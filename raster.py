@@ -102,10 +102,12 @@ def process_page(pdf: Path, p: int, root: Path):
 # ─── CLI ───
 cli = typer.Typer()
 
-@cli.command()
-def run(pdf: str = typer.Option(..., help="PDF file"),
-        pages: str = typer.Option("all", help="'all', '0', '2..5', '0,3,7'"),
-        out: str = typer.Option("build/coordination", help="output root")):
+@cli.command(name="")
+def main(
+    pdf:    str = typer.Option(..., help="PDF file"),
+    pages:  str = typer.Option("all", help="'all', '0', '2..5', '0,3,7'"),
+    out:    str = typer.Option("build/coordination", help="output root")
+):
     pdf_path = Path(pdf).expanduser().resolve()
     total    = pdf_page_count(pdf_path)
     page_ids = parse_pages(pages, total)
@@ -113,6 +115,3 @@ def run(pdf: str = typer.Option(..., help="PDF file"),
     out_root = Path(out).expanduser()
     for p in page_ids:
         process_page(pdf_path, p, out_root)
-
-if __name__=="__main__":
-    cli()
