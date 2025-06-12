@@ -1,3 +1,4 @@
+chcp 65001 
 .\pdf2cad-env\Scripts\python.exe data.py `
       --pdf   C:\Users\anish.nair\BAE_Systems_ML\coordination.pdf `
       --pages all `
