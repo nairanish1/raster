@@ -1,8 +1,8 @@
 def process_page(pdf: Path, p: int, root: Path):
-    t0   = time.time()
-    gray = raster_page(pdf, p)
-    vect = vector_boxes(pdf, p)
-    rast = raster_boxes_and_text(gray)
+    t0 = time.time()
+    gray  = raster_page(pdf, p)
+    vect  = vector_boxes(pdf, p)
+    rast  = raster_boxes_and_text(gray)
 
     notes = (
         [{"id": f"V{i:03d}", **v} for i, v in enumerate(vect)] +
@@ -12,16 +12,15 @@ def process_page(pdf: Path, p: int, root: Path):
     page_dir = root / f"page{p:03d}"
     page_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---------- write JSON (force UTF-8) ---------- ↓↓↓
-    with (page_dir / "sidecar_text.json").open("w", encoding="utf-8") as f:
-        json.dump(notes, f, indent=2, ensure_ascii=False)
-    # ----------------------------------------------- ↑↑↑
+    # ---------- WRITE JSON AS BYTES (no text-encoding issues) ----------
+    json_bytes = json.dumps(notes, indent=2, ensure_ascii=False).encode("utf-8")
+    with (page_dir / "sidecar_text.json").open("wb") as f:      #  ← 'wb'
+        f.write(json_bytes)
+    # ------------------------------------------------------------------
 
-    mask = build_mask(
-        gray.shape,
-        [v["bbox"] for v in vect],
-        [r["bbox"] for r in rast]
-    )
+    mask = build_mask(gray.shape,
+                      [v["bbox"] for v in vect],
+                      [r["bbox"] for r in rast])
     geom = gray.copy(); geom[mask > 0] = 255
 
     Image.fromarray(gray).save(page_dir / "page_raw.png")
@@ -29,3 +28,4 @@ def process_page(pdf: Path, p: int, root: Path):
 
     print(f"page {p:03d}: {len(notes):3d} texts masked "
           f"[{time.time() - t0:.1f}s]")
+
