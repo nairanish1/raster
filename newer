@@ -1,18 +1,31 @@
-C:\Users\anish.nair\OneDrive - BAE Systems Inc\Desktop\poppler-24.08.0\Library\bin
+def process_page(pdf: Path, p: int, root: Path):
+    t0   = time.time()
+    gray = raster_page(pdf, p)
+    vect = vector_boxes(pdf, p)
+    rast = raster_boxes_and_text(gray)
 
-POPPLER_PATH = r"C:\Users\anish.nair\OneDrive - BAE Systems Inc\Desktop\poppler-24.08.0\Library\bin"
+    notes = (
+        [{"id": f"V{i:03d}", **v} for i, v in enumerate(vect)] +
+        [{"id": f"R{j:03d}", **r} for j, r in enumerate(rast)]
+    )
 
-from pdf2image import convert_from_path, pdfinfo_from_path
+    page_dir = root / f"page{p:03d}"
+    page_dir.mkdir(parents=True, exist_ok=True)
 
-def pdf_page_count(pdf: Path) -> int:
-    info = pdfinfo_from_path(str(pdf),
-                             poppler_path=POPPLER_PATH)
-    return info["Pages"]
+    # ---------- write JSON (force UTF-8) ---------- ↓↓↓
+    with (page_dir / "sidecar_text.json").open("w", encoding="utf-8") as f:
+        json.dump(notes, f, indent=2, ensure_ascii=False)
+    # ----------------------------------------------- ↑↑↑
 
-def raster_page(pdf: Path, p: int):
-    img = convert_from_path(str(pdf),
-                            dpi=DPI,
-                            first_page=p+1, last_page=p+1,
-                            fmt="png",
-                            poppler_path=POPPLER_PATH)[0]
-    return np.array(img.convert("L"))
+    mask = build_mask(
+        gray.shape,
+        [v["bbox"] for v in vect],
+        [r["bbox"] for r in rast]
+    )
+    geom = gray.copy(); geom[mask > 0] = 255
+
+    Image.fromarray(gray).save(page_dir / "page_raw.png")
+    Image.fromarray(geom).save(page_dir / "geom_only.png")
+
+    print(f"page {p:03d}: {len(notes):3d} texts masked "
+          f"[{time.time() - t0:.1f}s]")
