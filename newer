@@ -1,0 +1,18 @@
+C:\Users\anish.nair\OneDrive - BAE Systems Inc\Desktop\poppler-24.08.0\Library\bin
+
+POPPLER_PATH = r"C:\Users\anish.nair\OneDrive - BAE Systems Inc\Desktop\poppler-24.08.0\Library\bin"
+
+from pdf2image import convert_from_path, pdfinfo_from_path
+
+def pdf_page_count(pdf: Path) -> int:
+    info = pdfinfo_from_path(str(pdf),
+                             poppler_path=POPPLER_PATH)
+    return info["Pages"]
+
+def raster_page(pdf: Path, p: int):
+    img = convert_from_path(str(pdf),
+                            dpi=DPI,
+                            first_page=p+1, last_page=p+1,
+                            fmt="png",
+                            poppler_path=POPPLER_PATH)[0]
+    return np.array(img.convert("L"))
