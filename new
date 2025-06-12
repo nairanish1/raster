@@ -1,4 +1,5 @@
-python data.py run `
-    --pdf    C:\Users\anish.nair\BAE_Systems_ML\coordination.pdf `
-    --pages  all `
-    --out    build\coordination
+python data.py `
+  --pdf   C:\Users\anish.nair\BAE_Systems_ML\coordination.pdf `
+  --pages all `
+  --out   build\coordination
+
