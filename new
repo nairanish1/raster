@@ -1,5 +1,5 @@
-.\pdf2cad-env\Scripts\python.exe  C:\Users\anish.nair\BAE_Systems_ML\data.py `
-    --pdf   C:\Users\anish.nair\BAE_Systems_ML\coordination.pdf `
+(pdf2cad-env) PS C:\Users\anish.nair\BAE_Systems_ML> python pdf_mask_all.py `
+    --pdf   "C:\Users\anish.nair\BAE_Systems_ML\coordination.pdf" `
     --pages all `
     --out   build\coordination
 
