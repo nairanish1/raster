@@ -1,43 +1,45 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-pdf_mask_all.py  –  extract EVERY text string first, then mask them on
-the requested pages.  Works on Windows consoles that use code-page 1252
-and everywhere else.
+pdf_mask_all.py –- extract *all* text from a PDF page, blank the glyphs,
+and save:
+    page_raw.png       original raster
+    geom_only.png      text-free image
+    sidecar_text.json  UTF-8 list of {"bbox":[x1,y1,x2,y2], "text": …}
 
-examples
+Examples
 --------
-python pdf_mask_all.py --pdf "C:\docs\coordination.pdf" --pages all   --out build\coord
-python pdf_mask_all.py --pdf "C:\docs\coordination.pdf" --pages 0..3  --out build\coord
+python pdf_mask_all.py --pdf "C:\\docs\\coordination.pdf" --pages all   --out build\\coord
+python pdf_mask_all.py --pdf "C:\\docs\\coordination.pdf" --pages 0..3 --out build\\coord
 """
 
 from __future__ import annotations
 from pathlib import Path
 import json, time, re, io, os, sys
 
-import cv2, numpy as np, typer, easyocr
+import numpy as np, cv2, typer, easyocr
 from pdf2image import convert_from_path, pdfinfo_from_path
 from PIL import Image
 from pdfminer.high_level import extract_pages
 from pdfminer.layout import LTTextContainer
 
-# ───────────────── 1. poppler (pdf2image backend) ─────────────────
+# ───────────────── 1.  Poppler (pdf2image backend) ────────────────
 POPPLER_PATH = (
     r"C:\Users\anish.nair\OneDrive - BAE Systems Inc\Desktop"
     r"\poppler-24.08.0\Library\bin"
 )
 print("Using poppler from:", POPPLER_PATH)
 
-# ───────────────── 2. force UTF-8 for console output ──────────────
+# ───────────────── 2.  Force UTF-8 *only* for the console ─────────
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
-# ───────────────── 3. configuration ───────────────────────────────
-DPI      = 300            # raster dpi
-PAD_VEC  = 5              # grow bounding-boxes a tiny bit
+# ───────────────── 3.  Script configuration ───────────────────────
+DPI      = 300
+PAD_VEC  = 5
 PAD_RAS  = 8
-LANGS    = ["en"]         # EasyOCR language(s)
+LANGS    = ["en"]
 
 reader = easyocr.Reader(LANGS, gpu=False, verbose=False)
 
@@ -46,18 +48,19 @@ def pdf_page_count(pdf: Path) -> int:
     return pdfinfo_from_path(str(pdf), poppler_path=POPPLER_PATH)["Pages"]
 
 def parse_pages(spec: str, total: int) -> list[int]:
+    """'all' | '7' | '0..3' | '0,2,8'  →  list[int]"""
     if spec.lower() == "all":
         return list(range(total))
-    if re.fullmatch(r"\d+(,\d+)+", spec):          # 0,2,7
+    if re.fullmatch(r"\d+(,\d+)+", spec):
         return [int(x) for x in spec.split(",")]
-    m = re.fullmatch(r"(\d+)\.\.(\d+)", spec):     # 0..3
+    m = re.fullmatch(r"(\d+)\.\.(\d+)", spec)      # 0..3
     if m:
         a, b = int(m[1]), int(m[2])
         return list(range(a, b + 1))
     return [int(spec)]
 
 def vector_boxes(pdf: Path, idx: int) -> list[dict]:
-    out : list[dict] = []
+    out: list[dict] = []
     for p_no, layout in enumerate(extract_pages(str(pdf))):
         if p_no != idx:
             continue
@@ -81,7 +84,7 @@ def raster_boxes_and_text(gray: np.ndarray) -> list[dict]:
     h, w = gray.shape
     out  = []
     for pts, txt, _ in reader.readtext(gray, detail=1, paragraph=False):
-        xs = [int(p[0]) for p in pts];  ys = [int(p[1]) for p in pts]
+        xs = [int(p[0]) for p in pts]; ys = [int(p[1]) for p in pts]
         x1 = max(0, min(xs) - PAD_RAS);  y1 = max(0, min(ys) - PAD_RAS)
         x2 = min(w, max(xs) + PAD_RAS);  y2 = min(h, max(ys) + PAD_RAS)
         out.append({"bbox": [x1, y1, x2, y2], "text": txt.strip()})
@@ -98,9 +101,8 @@ def build_mask(shape, v_boxes, r_boxes) -> np.ndarray:
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
 
 def dump_json_utf8(path: Path, obj) -> None:
-    """Write *binary* UTF-8 – bypass Windows code-page completely."""
-    path.write_bytes(json.dumps(obj, indent=2,
-                                ensure_ascii=False).encode("utf-8"))
+    """Write *binary* UTF-8 – bypass the cp-1252 text layer entirely."""
+    path.write_bytes(json.dumps(obj, indent=2, ensure_ascii=False).encode("utf-8"))
 # ══════════════════════════════════════════════════════════════════
 
 def process_page(pdf: Path, idx: int, root: Path) -> None:
@@ -128,7 +130,7 @@ def process_page(pdf: Path, idx: int, root: Path) -> None:
     print(f"page {idx:03d}: {len(notes):4d} texts masked "
           f"[{time.time() - t0:.1f}s]")
 
-# ───────────────────────────── Typer CLI ──────────────────────────
+# ────────────────────────── Typer CLI ─────────────────────────────
 cli = typer.Typer()
 
 @cli.command(no_args_is_help=True)
