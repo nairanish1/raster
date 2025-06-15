@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-pdf_mask_all.py –- extract *all* text from a PDF page, blank the glyphs,
-and save:
-    page_raw.png       original raster
-    geom_only.png      text-free image
-    sidecar_text.json  UTF-8 list of {"bbox":[x1,y1,x2,y2], "text": …}
+pdf_mask_all.py – extract EVERY text string, then blank them on the
+requested pages.  Writes sidecar_text.json with UTF-8 encoding so no
+'cp1252' / 'charmap' errors can occur.
 
-Examples
+examples
 --------
 python pdf_mask_all.py --pdf "C:\\docs\\coordination.pdf" --pages all   --out build\\coord
 python pdf_mask_all.py --pdf "C:\\docs\\coordination.pdf" --pages 0..3 --out build\\coord
@@ -17,25 +15,25 @@ from __future__ import annotations
 from pathlib import Path
 import json, time, re, io, os, sys
 
-import numpy as np, cv2, typer, easyocr
+import cv2, numpy as np, typer, easyocr
 from pdf2image import convert_from_path, pdfinfo_from_path
 from PIL import Image
 from pdfminer.high_level import extract_pages
 from pdfminer.layout import LTTextContainer
 
-# ───────────────── 1.  Poppler (pdf2image backend) ────────────────
+# ───────────────── 1. poppler (pdf2image backend) ─────────────────
 POPPLER_PATH = (
     r"C:\Users\anish.nair\OneDrive - BAE Systems Inc\Desktop"
     r"\poppler-24.08.0\Library\bin"
 )
 print("Using poppler from:", POPPLER_PATH)
 
-# ───────────────── 2.  Force UTF-8 *only* for the console ─────────
+# ───────────────── 2. force UTF-8 for console output ──────────────
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
-# ───────────────── 3.  Script configuration ───────────────────────
+# ───────────────── 3. configuration ───────────────────────────────
 DPI      = 300
 PAD_VEC  = 5
 PAD_RAS  = 8
@@ -48,19 +46,18 @@ def pdf_page_count(pdf: Path) -> int:
     return pdfinfo_from_path(str(pdf), poppler_path=POPPLER_PATH)["Pages"]
 
 def parse_pages(spec: str, total: int) -> list[int]:
-    """'all' | '7' | '0..3' | '0,2,8'  →  list[int]"""
     if spec.lower() == "all":
         return list(range(total))
-    if re.fullmatch(r"\d+(,\d+)+", spec):
+    if re.fullmatch(r"\d+(,\d+)+", spec):          # 0,2,7
         return [int(x) for x in spec.split(",")]
-    m = re.fullmatch(r"(\d+)\.\.(\d+)", spec)      # 0..3
+    m = re.fullmatch(r"(\d+)\.\.(\d+)", spec):     # 0..3
     if m:
         a, b = int(m[1]), int(m[2])
         return list(range(a, b + 1))
     return [int(spec)]
 
 def vector_boxes(pdf: Path, idx: int) -> list[dict]:
-    out: list[dict] = []
+    out : list[dict] = []
     for p_no, layout in enumerate(extract_pages(str(pdf))):
         if p_no != idx:
             continue
@@ -92,19 +89,14 @@ def raster_boxes_and_text(gray: np.ndarray) -> list[dict]:
 
 def build_mask(shape, v_boxes, r_boxes) -> np.ndarray:
     mask = np.zeros(shape, np.uint8)
-    h, w = shape
     for x1, y1, x2, y2 in v_boxes + r_boxes:
         cv2.rectangle(mask,
                       (max(0, x1 - PAD_VEC), max(0, y1 - PAD_VEC)),
-                      (min(w, x2 + PAD_VEC), min(h, y2 + PAD_VEC)),
+                      (min(shape[1], x2 + PAD_VEC), min(shape[0], y2 + PAD_VEC)),
                       255, -1)
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
 
-def dump_json_utf8(path: Path, obj) -> None:
-    """Write *binary* UTF-8 – bypass the cp-1252 text layer entirely."""
-    path.write_bytes(json.dumps(obj, indent=2, ensure_ascii=False).encode("utf-8"))
-# ══════════════════════════════════════════════════════════════════
-
+# ═════════════════════════ processing ═════════════════════════════
 def process_page(pdf: Path, idx: int, root: Path) -> None:
     t0   = time.time()
     gray = raster_page(pdf, idx)
@@ -118,7 +110,10 @@ def process_page(pdf: Path, idx: int, root: Path) -> None:
 
     page_dir = root / f"page{idx:03d}"
     page_dir.mkdir(parents=True, exist_ok=True)
-    dump_json_utf8(page_dir / "sidecar_text.json", notes)
+
+    # ←―― save UTF-8 directly (no cp-1252 surprises)
+    with (page_dir / "sidecar_text.json").open("w", encoding="utf-8") as f:
+        json.dump(notes, f, indent=2, ensure_ascii=False)
 
     geom = gray.copy()
     geom[build_mask(gray.shape,
@@ -130,7 +125,7 @@ def process_page(pdf: Path, idx: int, root: Path) -> None:
     print(f"page {idx:03d}: {len(notes):4d} texts masked "
           f"[{time.time() - t0:.1f}s]")
 
-# ────────────────────────── Typer CLI ─────────────────────────────
+# ───────────────────────── Typer CLI ──────────────────────────────
 cli = typer.Typer()
 
 @cli.command(no_args_is_help=True)
