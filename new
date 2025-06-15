@@ -18,6 +18,16 @@ python pdf_mask_all.py `
        --pages all `
        --out   build\coordination
 
+python .\pdf_mask_all.py `
+    --pdf   "C:\Users\anish.nair\BAE_Systems_ML\coordination.pdf" `
+    --pages all `                       
+    --out   "build\coord_max" `         
+    --dpi   500  `                      
+    --pad-vec 12 `                      
+    --pad-ras 18 `                      
+    --paddle                            
+
+
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 os.environ["PYTHONIOENCODING"] = "utf-8"
