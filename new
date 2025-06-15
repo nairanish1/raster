@@ -8,6 +8,10 @@
     --pages all `
     --out  "build\coordination"
 
+python pdf_mask_all.py `
+       --pdf   "C:\Users\anish.nair\BAE_Systems_ML\coordination.pdf" `
+       --pages all `
+       --out   build\coordination
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
