@@ -1,4 +1,3 @@
-import os
 import re
 import joblib
 import numpy as np
@@ -8,35 +7,14 @@ from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.metrics import mean_absolute_percentage_error, r2_score
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 
-# 1. Load data
-excel_file = r"C:\Users\anish.nair\Downloads\PNOCs 2024-2025.xlsm"
-sheet_name = "Baseline + Actual Dates"
-df_raw = pd.read_excel(excel_file, sheet_name=sheet_name)
-df_raw.columns = df_raw.columns.str.strip()
+# ────────────────────────────────────────────────────────────────
+# 0. CONFIG ── update only if your sheet/path changes
+# ────────────────────────────────────────────────────────────────
+EXCEL_FILE = r"C:\Users\anish.nair\Downloads\PNOCs 2024-2025.xlsm"
+SHEET_NAME = "Baseline + Actual Dates"
 
-# 2. Detect key columns
-col_map = {}
-for col in df_raw.columns:
-    low = col.lower()
-    if 'process' in low:         col_map['process'] = col
-    elif 'baseline' in low:      col_map['baseline'] = col
-    elif 'actual' in low:        col_map['actual'] = col
-    elif re.search(r'pnoc.*id', low): col_map['pnoc_id'] = col
-
-# 3. Clean 'Process' & parse dates
-df_raw[col_map['process']] = (
-    df_raw[col_map['process']]
-      .str.replace(r'\s*\(.*\)', '', regex=True)
-      .str.strip()
-)
-df_raw[col_map['baseline']] = pd.to_datetime(df_raw[col_map['baseline']], errors='coerce')
-df_raw[col_map['actual']]   = pd.to_datetime(df_raw[col_map['actual']],   errors='coerce')
-
-# 4. Milestones
-milestones = [
+MILESTONES = [
     'PNOC/CI Issued',
     'R&C Due',
     'Enter TA',
@@ -46,84 +24,142 @@ milestones = [
     'Revision Issued',
 ]
 
-# 5. Pivot
-base = df_raw.pivot(
-    index=col_map['pnoc_id'], columns=col_map['process'], values=col_map['baseline']
-)[milestones].reset_index(drop=True)
-act  = df_raw.pivot(
-    index=col_map['pnoc_id'], columns=col_map['process'], values=col_map['actual']
-)[milestones].reset_index(drop=True)
-
-# 6. Interpolate missing dates via integer-spline
-for df_date in (base, act):
-    for m in milestones:
-        if df_date[m].isnull().any():
-            ints = df_date[m].astype('int64')
-            interp = pd.Series(ints).interpolate(method='spline', order=3)
-            df_date[m] = pd.to_datetime(interp.astype('int64'))
-
-# 7. Define holidays
-holidays = np.array([
-    datetime(2024,1,1), datetime(2024,1,15), datetime(2024,5,27),
-    datetime(2024,7,4), datetime(2024,9,2),  datetime(2024,10,14),
-    datetime(2024,11,14), datetime(2024,11,28), datetime(2024,12,25),
+HOLIDAYS_2024 = np.array([
+    datetime(2024, 1,  1), datetime(2024, 1, 15),
+    datetime(2024, 5, 27), datetime(2024, 7,  4),
+    datetime(2024, 9,  2), datetime(2024,10, 14),
+    datetime(2024,11, 14), datetime(2024,11, 28),
+    datetime(2024,12, 25),
 ], dtype='datetime64[D]')
 
-# 8. Safe business-day count
-def safe_busday_count(start_dates, end_dates, holidays):
-    result = np.full(start_dates.shape, np.nan)
-    mask = (~pd.isna(start_dates)) & (~pd.isna(end_dates))
-    result[mask] = np.busday_count(
-        start_dates[mask].astype('datetime64[D]'),
-        end_dates[mask].astype('datetime64[D]'),
-        holidays=holidays
-    )
-    return result
+# ────────────────────────────────────────────────────────────────
+# 1. LOAD SHEET & AUTO-DETECT COLUMN HEADERS
+# ────────────────────────────────────────────────────────────────
+df_raw = pd.read_excel(EXCEL_FILE, sheet_name=SHEET_NAME)
+df_raw.columns = df_raw.columns.str.strip()          # trim header whitespace
 
-for i in range(len(milestones)-1):
-    s, e = milestones[i], milestones[i+1]
-    bl = f'{s}_to_{e}_BL'
-    ac = f'{s}_to_{e}_ACT'
-    base[bl] = safe_busday_count(base[s], base[e], holidays)
-    act[ac] = safe_busday_count(act[s], act[e], holidays)
+col_map = {}                                         # find key columns
+for c in df_raw.columns:
+    l = c.lower()
+    if 'process' in l:      col_map['process']  = c
+    elif 'baseline' in l:   col_map['baseline'] = c
+    elif 'actual' in l:     col_map['actual']   = c
+    elif re.search(r'pnoc.*id', l):
+        col_map['pnoc_id'] = c
 
-# 9. Combine & fill NaNs
-df = pd.concat([
-    base.filter(like='_BL'), act.filter(like='_ACT')
-], axis=1).apply(lambda col: col.fillna(col.median()), axis=0)
+# ────────────────────────────────────────────────────────────────
+# 2. CLEAN PROCESS LABELS  &  PARSE DATES
+# ────────────────────────────────────────────────────────────────
+df_raw[col_map['process']] = (
+    df_raw[col_map['process']]
+        .str.replace(r'\s*\(.*\)', '', regex=True)   # drop "(Need Date: …)"
+        .str.strip()
+)
 
-# 10. Features & multi-target
-feature_cols = [c for c in df.columns if c.endswith('_BL')]
-target_cols  = [c for c in df.columns if c.endswith('_ACT')]
-X = df[feature_cols]
-y = df[target_cols]
+df_raw[col_map['baseline']] = pd.to_datetime(df_raw[col_map['baseline']], errors='coerce')
+df_raw[col_map['actual'  ]] = pd.to_datetime(df_raw[col_map['actual'  ]], errors='coerce')
 
-# 11. Train/test
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+# ────────────────────────────────────────────────────────────────
+# 3. PIVOT  →  one row = one PNOC  (baseline & actual)
+# ────────────────────────────────────────────────────────────────
+base = (
+    df_raw.pivot(index=col_map['pnoc_id'],
+                 columns=col_map['process'],
+                 values=col_map['baseline'])[MILESTONES]
+      .reset_index(drop=True)
+)
+act  = (
+    df_raw.pivot(index=col_map['pnoc_id'],
+                 columns=col_map['process'],
+                 values=col_map['actual'])[MILESTONES]
+      .reset_index(drop=True)
+)
 
-# 12. Multi-output model
-multi = MultiOutputRegressor(HistGradientBoostingRegressor(random_state=42))
-param_grid = {
-    'estimator__max_iter': [100, 200],
-    'estimator__max_depth': [3, 5],
-    'estimator__learning_rate': [0.01, 0.1],
-}
-grid = GridSearchCV(multi, param_grid, cv=3,
-                    scoring='neg_mean_absolute_percentage_error', n_jobs=-1)
-grid.fit(X_train, y_train)
+# ────────────────────────────────────────────────────────────────
+# 4. INTERPOLATE MISSING DATES  (int64-spline → back to datetime)
+# ────────────────────────────────────────────────────────────────
+for df_dates in (base, act):
+    for m in MILESTONES:
+        if df_dates[m].isna().any():
+            ints = df_dates[m].astype('int64')
+            ints_interp = (
+                pd.Series(ints).interpolate(method='spline', order=3)
+                               .astype('int64')
+            )
+            df_dates[m] = pd.to_datetime(ints_interp)
 
-# 13. Evaluate
+# ────────────────────────────────────────────────────────────────
+# 5. SAFE BUSINESS-DAY COUNTS  (handles residual NaT)
+# ────────────────────────────────────────────────────────────────
+def busdays(start_series: pd.Series,
+            end_series:   pd.Series,
+            holi: np.ndarray) -> np.ndarray:
+    """np.busday_count with NaT protection; returns float array (NaN where missing)."""
+    mask = start_series.notna() & end_series.notna()
+    out  = np.full(len(start_series), np.nan, dtype=float)
+    if mask.any():
+        s = start_series[mask].dt.normalize().to_numpy(dtype='datetime64[D]')
+        e = end_series  [mask].dt.normalize().to_numpy(dtype='datetime64[D]')
+        out[mask] = np.busday_count(s, e, holidays=holi)
+    return out
+
+for i in range(len(MILESTONES) - 1):
+    a, b = MILESTONES[i], MILESTONES[i + 1]
+    base[f'{a}_to_{b}_BL'] = busdays(base[a], base[b], HOLIDAYS_2024)
+    act [f'{a}_to_{b}_ACT'] = busdays(act [a], act [b], HOLIDAYS_2024)
+
+# ────────────────────────────────────────────────────────────────
+# 6. FEATURE / TARGET MATRICES
+# ────────────────────────────────────────────────────────────────
+df = (
+    pd.concat([base.filter(like='_BL'), act.filter(like='_ACT')], axis=1)
+      .apply(lambda s: s.fillna(s.median()), axis=0)       # median-fill
+)
+
+X = df[[c for c in df.columns if c.endswith('_BL')]]
+Y = df[[c for c in df.columns if c.endswith('_ACT')]]      # multi-target
+
+# ────────────────────────────────────────────────────────────────
+# 7. TRAIN / TEST  &  MULTI-OUTPUT REGRESSION
+# ────────────────────────────────────────────────────────────────
+X_tr, X_te, Y_tr, Y_te = train_test_split(X, Y, test_size=0.2, random_state=42)
+
+grid = GridSearchCV(
+    MultiOutputRegressor(HistGradientBoostingRegressor(random_state=42)),
+    param_grid={
+        'estimator__max_iter'      : [100, 200],
+        'estimator__max_depth'     : [3, 5],
+        'estimator__learning_rate' : [0.01, 0.1],
+    },
+    cv=3,
+    scoring='neg_mean_absolute_percentage_error',
+    n_jobs=-1,
+)
+grid.fit(X_tr, Y_tr)
+
 best = grid.best_estimator_
-y_pred = best.predict(X_test)
-results = []
-for idx, col in enumerate(target_cols):
-    mape = mean_absolute_percentage_error(y_test[col], y_pred[:, idx])
-    r2   = r2_score(y_test[col], y_pred[:, idx])
-    results.append({'Phase': col, 'MAPE': f"{mape:.2%}", 'R2': f"{r2:.3f}"})
-import ace_tools as tools; tools.display_dataframe_to_user("Regression Results", pd.DataFrame(results))
+Y_pred = best.predict(X_te)
 
-# 14. Save model
+# ────────────────────────────────────────────────────────────────
+# 8. PHASE-BY-PHASE METRICS
+# ────────────────────────────────────────────────────────────────
+results = []
+for idx, col in enumerate(Y_te.columns):
+    results.append({
+        'Phase': col,
+        'MAPE' : f"{mean_absolute_percentage_error(Y_te.iloc[:, idx], Y_pred[:, idx]):.2%}",
+        'R²'   : f"{r2_score(Y_te.iloc[:, idx],            Y_pred[:, idx]):.3f}"
+    })
+
+print("\nPHASE-LEVEL PERFORMANCE")
+print(pd.DataFrame(results).to_string(index=False))
+
+# ────────────────────────────────────────────────────────────────
+# 9. SAVE MODEL
+# ────────────────────────────────────────────────────────────────
 joblib.dump(best, "pnoc_multiphase_predictor.pkl")
+print("\n✅ Model saved to  pnoc_multiphase_predictor.pkl")
+
 
 
 
