@@ -109,7 +109,8 @@ def main():
 
     # Filters
     types = st.sidebar.multiselect('PNOC Type', ['Routine','Critical'], default=['Routine','Critical'])
-    min_fans = st.sidebar.number_input('Min FAN reviews (>=4)', min_value=4, value=4, step=1)
+    st.sidebar.header('3. FAN review cycles (≥4)')
+    min_fans = st.sidebar.number_input('Min FAN reviews', min_value=4, value=4, step=1)
     if st.sidebar.button('Run'):
         summary = analyze(df, types, min_fans)
         if summary is None or summary.empty:
