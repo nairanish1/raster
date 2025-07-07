@@ -9,7 +9,7 @@ import io
 # ---------------------------------------------------
 @st.cache_data
 def load_and_clean(excel_bytes: bytes) -> pd.DataFrame:
-    """Loads and cleans the PNOC sheets, merging needed_date for critical PNOCs."""
+    """Loads and cleans the PNOC sheets."""
     xls = pd.ExcelFile(io.BytesIO(excel_bytes))
     df_main = pd.read_excel(xls, sheet_name="Baseline + Actual Dates")
     df_crit = pd.read_excel(xls, sheet_name="Need date and critical status")
@@ -22,9 +22,8 @@ def load_and_clean(excel_bytes: bytes) -> pd.DataFrame:
     # Parse dates
     df_main['Baseline'] = pd.to_datetime(df_main['Baseline'], format="%m/%d/%Y", errors="coerce")
     df_main['Actual']   = pd.to_datetime(df_main['Actual'],   format="%m/%d/%Y", errors="coerce")
-    df_crit['needed_date'] = pd.to_datetime(df_crit['needed_date'], format="%d-%b-%y", errors="coerce")
 
-    # Merge CIRM data
+    # Merge CIRM
     df = df_main.merge(
         df_cirm[['PNOC ID', 'RM', 'CI']], on='PNOC ID', how='left'
     )
@@ -34,10 +33,9 @@ def load_and_clean(excel_bytes: bytes) -> pd.DataFrame:
     df['Total FAN Reviews'] += df['RM'].apply(lambda x: 1 if pd.notna(x) and x != 0 else 0)
     df['Total FAN Reviews'] += df['CI'].apply(lambda x: max(0, x - 1) if pd.notna(x) else 0)
 
-    # Merge critical flag + needed_date
+    # Merge critical flag only
     df = df.merge(
-        df_crit[['PNOC ID', 'critical', 'needed_date']],
-        on='PNOC ID', how='left'
+        df_crit[['PNOC ID', 'critical']], on='PNOC ID', how='left'
     )
 
     return df
@@ -65,10 +63,6 @@ def schedule_variance(baseline: pd.Series, actual: pd.Series) -> np.ndarray:
 #  Main analysis: filter then compute summary
 # ---------------------------------------------------
 def analyze(df: pd.DataFrame, types: list[str], min_fans: int) -> pd.DataFrame | None:
-    # Choose baseline: needed_date for critical, otherwise Baseline
-    df = df.copy()
-    df['Calc_Baseline'] = np.where(df['critical'] == 'Y', df['needed_date'], df['Baseline'])
-
     # Filter PNOC type
     mask = pd.Series(False, index=df.index)
     if 'Critical' in types:
@@ -77,22 +71,23 @@ def analyze(df: pd.DataFrame, types: list[str], min_fans: int) -> pd.DataFrame |
         mask |= df['critical'] != 'Y'
     df = df[mask]
 
-    # Filter FAN reviews
+    # Filter FAN reviews (4 or more)
     df = df[df['Total FAN Reviews'] >= min_fans]
     if df.empty:
         return None
 
-    # Compute variance
-    df['Variance'] = schedule_variance(df['Calc_Baseline'], df['Actual'])
-    df = df.dropna(subset=['Variance'])
+    # Compute variance using Baseline/Actual
+    df = df.copy()
+    df['Variance (Bus Days)'] = schedule_variance(df['Baseline'], df['Actual'])
+    df = df.dropna(subset=['Variance (Bus Days)'])
     if df.empty:
         return None
 
     # Mean per PNOC
-    mean_var = df.groupby('PNOC ID')['Variance'].mean()
+    mean_var = df.groupby('PNOC ID')['Variance (Bus Days)'].mean()
 
     # Build summary DataFrame
-    summary = mean_var.rename('Variance (Bus Days)').to_frame().reset_index()
+    summary = mean_var.to_frame().reset_index()
     # Bucket status
     def bucket(v):
         if v >= 1:
@@ -149,6 +144,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
