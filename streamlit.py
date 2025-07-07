@@ -48,7 +48,6 @@ US_HOL_2024 = np.array([
 
 def safe_busday_count(start: pd.Series, end: pd.Series) -> np.ndarray:
     """Vectorised wrapper around np.busday_count that skips NaT rows."""
-    # mask valid rows
     valid = start.notna() & end.notna()
     result = np.full(len(start), np.nan)
     if valid.any():
@@ -62,7 +61,6 @@ def safe_busday_count(start: pd.Series, end: pd.Series) -> np.ndarray:
 # ---------------------------------------------------
 
 def analyze(df: pd.DataFrame, types: list[str], min_fans: int):
-    # filter by critical / routine
     mask = pd.Series(False, index=df.index)
     if 'Critical' in types:
         mask |= (df['critical'] == 'Y')
@@ -70,31 +68,29 @@ def analyze(df: pd.DataFrame, types: list[str], min_fans: int):
         mask |= (df['critical'] != 'Y')
     df = df[mask]
 
-    # fan‑review filter
     df = df[df['Total FAN Reviews'] >= min_fans]
     if df.empty:
         return None, None
 
-    # compute business‑day differences with NaT‑safety
     df = df.copy()
     df['Business_Days_Difference'] = safe_busday_count(df['Baseline'], df['Actual'])
-
-    # drop any rows that are still NaN (means Baseline/Actual were NaT)
     df = df.dropna(subset=['Business_Days_Difference'])
     if df.empty:
         return None, None
 
-    # average per PNOC
     bsa = (
         df.groupby('PNOC ID')['Business_Days_Difference']
           .mean()
           .sort_values(ascending=False)
     )
 
-    def category(v):
-        if v < 0: return 'Delayed'
-        if v <= 1: return 'On Time'
-        return 'Ahead'
+    # Corrected categorisation: positive diff = delay, negative = ahead
+    def category(v: float) -> str:
+        if v > 1:
+            return 'Delayed'   # Actual finished AFTER baseline window ➜ behind schedule
+        if v >= 0:
+            return 'On Time'  # 0‒1 business‑day variance ➜ basically on time
+        return 'Ahead'        # finished BEFORE baseline ➜ ahead of schedule
 
     summary = pd.DataFrame({
         'PNOC ID': bsa.index,
@@ -111,7 +107,6 @@ def main():
     st.set_page_config(page_title='Advanced Coordinated Analysis', layout='wide')
     st.title('Advanced Coordinated Analysis (ACA)')
 
-    # ---- sidebar: upload ----
     st.sidebar.header('1. Upload your Excel')
     upload = st.sidebar.file_uploader('PNOCs 2024‑2025 .xlsm', type=['xls','xlsx','xlsm'])
     if not upload:
@@ -120,13 +115,11 @@ def main():
 
     df = load_and_clean(upload.read())
 
-    # ---- filters ----
     st.sidebar.header('2. Filter PNOC Type')
     types = st.sidebar.multiselect('Choose PNOC categories', ['Routine','Critical'], default=['Routine','Critical'])
     st.sidebar.header('3. FAN review cycles')
     min_fans = st.sidebar.number_input('Min FAN reviews', min_value=4, value=4, step=1)
 
-    # ---- run analysis ----
     if st.sidebar.button('Run Analysis'):
         bsa, summary = analyze(df, types, min_fans)
         if summary is None:
@@ -136,13 +129,13 @@ def main():
         import altair as alt
         chart = (
             alt.Chart(summary)
-                .mark_bar()
-                .encode(
+               .mark_bar()
+               .encode(
                     x=alt.X('PNOC ID', sort='-y'),
                     y='BSA (Avg Days)',
                     color=alt.Color('Category', scale=alt.Scale(domain=['Ahead','On Time','Delayed'], range=['green','gold','crimson']))
-                )
-                .properties(width=850, height=400)
+               )
+               .properties(width=850, height=400)
         )
 
         st.subheader('Baseline vs. Actual ▶️ BSA per PNOC')
