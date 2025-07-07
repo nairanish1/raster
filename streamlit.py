@@ -129,16 +129,11 @@ def main():
             st.warning('No data left after filtering / date cleanup. Try different filters or inspect your input file.')
             return
 
-        # ---- handle both old (tuple) and new (DataFrame) returns gracefully ----
-        if isinstance(result, tuple):
-            # legacy path: (bsa, summary) or (summary,)
-            summary = result[-1]
-        else:
-            summary = result
-        summary = result
+                # result from analyze() is a DataFrame (or None already handled above)
+        summary = result  # <- guaranteed DataFrame
 
         # dynamic diverging color scale centred at 0
-        max_abs = max(1, abs(summary['Variance (Bus Days)']).max())
+        max_abs = max(1, abs(summary['Variance (Bus Days)']).max()) max(1, abs(summary['Variance (Bus Days)']).max())
 
         import altair as alt
         chart = (
