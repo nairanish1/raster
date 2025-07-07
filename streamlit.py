@@ -128,7 +128,13 @@ def main():
         if result is None:
             st.warning('No data left after filtering / date cleanup. Try different filters or inspect your input file.')
             return
-        # unpack
+
+        # ---- handle both old (tuple) and new (DataFrame) returns gracefully ----
+        if isinstance(result, tuple):
+            # legacy path: (bsa, summary) or (summary,)
+            summary = result[-1]
+        else:
+            summary = result
         summary = result
 
         # dynamic diverging color scale centred at 0
