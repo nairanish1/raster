@@ -68,30 +68,29 @@ def analyze(df: pd.DataFrame, types: list[str], min_fans: int) -> pd.DataFrame |
         mask |= df['critical']!='Y'
     df = df[mask]
 
-    # Filter FAN
-    df = df[df['Total FAN Reviews']>=min_fans]
+    # Filter FAN (min_fans or more)
+    df = df[df['Total FAN Reviews'] >= min_fans]
     if df.empty:
         return None
 
     # Variance
     df = df.copy()
-    df['Variance'] = schedule_variance(df['Baseline'], df['Actual'])
-    df = df.dropna(subset=['Variance'])
+    df['Variance (Bus Days)'] = schedule_variance(df['Baseline'], df['Actual'])
+    df = df.dropna(subset=['Variance (Bus Days)'])
     if df.empty:
         return None
 
     # Mean per PNOC
-    mean_var = df.groupby('PNOC ID')['Variance'].mean()
+    mean_var = df.groupby('PNOC ID')['Variance (Bus Days)'].mean()
 
     # Build summary
-    summary = mean_var.rename('Variance (Bus Days)').to_frame()
+    summary = mean_var.to_frame().reset_index()
     # Bucket
     def bucket(v):
-        if v>=1: return 'Ahead'
-        if v>=-1: return 'On Time'
+        if v >= 1: return 'Ahead'
+        if v >= -1: return 'On Time'
         return 'Delayed'
     summary['Bucket'] = summary['Variance (Bus Days)'].apply(bucket)
-    summary = summary.reset_index()
     return summary
 
 # ---------------------------------------------------
@@ -110,10 +109,10 @@ def main():
 
     # Filters
     types = st.sidebar.multiselect('PNOC Type', ['Routine','Critical'], default=['Routine','Critical'])
-    min_fans = st.sidebar.number_input('Min FAN reviews', 4, 4)
+    min_fans = st.sidebar.number_input('Min FAN reviews (>=4)', min_value=4, value=4, step=1)
     if st.sidebar.button('Run'):
         summary = analyze(df, types, min_fans)
-        if summary is None:
+        if summary is None or summary.empty:
             st.warning('No data after filters')
             return
 
@@ -121,8 +120,8 @@ def main():
         max_abs = max(1, abs(summary['Variance (Bus Days)']).max())
         import altair as alt
         chart = alt.Chart(summary).mark_bar().encode(
-            x=alt.X('PNOC ID:N', sort='-y'),
-            y=alt.Y('Variance (Bus Days):Q'),
+            x=alt.X('PNOC ID:N', sort='-y', title='PNOC ID'),
+            y=alt.Y('Variance (Bus Days):Q', title='Schedule Variance (Bus Days)'),
             color=alt.Color('Variance (Bus Days):Q', scale=alt.Scale(scheme='redyellowgreen', domainMid=0)),
             tooltip=['PNOC ID','Variance (Bus Days)','Bucket']
         ).properties(height=400)
