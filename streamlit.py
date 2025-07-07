@@ -124,10 +124,12 @@ def main():
     min_fans = st.sidebar.number_input('Min FAN reviews', min_value=4, value=4, step=1)
 
     if st.sidebar.button('Run Analysis'):
-        summary = analyze(df, types, min_fans)
-        if summary is None:
+        result = analyze(df, types, min_fans)
+        if result is None:
             st.warning('No data left after filtering / date cleanup. Try different filters or inspect your input file.')
             return
+        # unpack
+        summary = result
 
         # dynamic diverging color scale centred at 0
         max_abs = max(1, abs(summary['Variance (Bus Days)']).max())
@@ -141,8 +143,9 @@ def main():
                     y=alt.Y('Variance (Bus Days):Q', title='Schedule Variance (Business Days)'),
                     color=alt.Color('Variance (Bus Days):Q',
                                     scale=alt.Scale(domain=[-max_abs, 0, max_abs],
-                                                    range=['crimson','lightgrey','seagreen']),
-                                    legend=alt.Legend(title='Variance')),
+                                                    range=['crimson','lightgrey','seagreen'],
+                                                    domainMid=0),
+                                    legend=alt.Legend(title='Δ Business Days')),
                     tooltip=['PNOC ID','Variance (Bus Days)','Bucket']
                )
                .properties(width=900, height=450)
@@ -153,11 +156,11 @@ def main():
 
         st.subheader('Detailed Summary Table')
         st.dataframe(summary.set_index('PNOC ID'))
+        st.dataframe(summary.set_index('PNOC ID'))
 
     st.sidebar.markdown('---')
     st.sidebar.write('© Your Team – Advanced Coordinated Analysis')
 
 if __name__ == '__main__':
     main()
-
 
