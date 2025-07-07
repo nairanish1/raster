@@ -38,7 +38,7 @@ def load_and_clean(excel_bytes: bytes):
     return df
 
 # ---------------------------------------------------
-#  Business‑day helper that is NaT‑safe
+#  Business‑day helper (Actual − Baseline, so late ⇒ negative)
 # ---------------------------------------------------
 US_HOL_2024 = np.array([
     datetime(2024,1,1),  datetime(2024,1,15), datetime(2024,5,27),
@@ -46,14 +46,15 @@ US_HOL_2024 = np.array([
     datetime(2024,11,11), datetime(2024,11,28), datetime(2024,12,25)
 ], dtype='datetime64[D]')
 
-def safe_busday_count(start: pd.Series, end: pd.Series) -> np.ndarray:
-    """Vectorised wrapper around np.busday_count that skips NaT rows."""
-    valid = start.notna() & end.notna()
-    result = np.full(len(start), np.nan)
+def schedule_variance(baseline: pd.Series, actual: pd.Series) -> np.ndarray:
+    """Return working‑day variance *Actual − Baseline* (late ⇒ −, early ⇒ +)."""
+    valid = baseline.notna() & actual.notna()
+    result = np.full(len(baseline), np.nan)
     if valid.any():
-        start_arr = start[valid].dt.normalize().values.astype('datetime64[D]')
-        end_arr   = end[valid].dt.normalize().values.astype('datetime64[D]')
-        result[valid] = np.busday_count(start_arr, end_arr, holidays=US_HOL_2024)
+        base_arr = baseline[valid].dt.normalize().values.astype('datetime64[D]')
+        act_arr  = actual[valid].dt.normalize().values.astype('datetime64[D]')
+        # invert order so a late Actual gives negative days
+        result[valid] = np.busday_count(act_arr, base_arr, holidays=US_HOL_2024)
     return result
 
 # ---------------------------------------------------
@@ -73,31 +74,31 @@ def analyze(df: pd.DataFrame, types: list[str], min_fans: int):
         return None, None
 
     df = df.copy()
-    df['Business_Days_Difference'] = safe_busday_count(df['Baseline'], df['Actual'])
-    df = df.dropna(subset=['Business_Days_Difference'])
+    df['Schedule_Variance'] = schedule_variance(df['Baseline'], df['Actual'])
+    df = df.dropna(subset=['Schedule_Variance'])
     if df.empty:
         return None, None
 
+    # mean variance per PNOC
     bsa = (
-        df.groupby('PNOC ID')['Business_Days_Difference']
+        df.groupby('PNOC ID')['Schedule_Variance']
           .mean()
           .sort_values(ascending=False)
     )
 
-    # Corrected categorisation: positive diff = delay, negative = ahead
-    def category(v: float) -> str:
-        if v > 1:
-            return 'Delayed'   # Actual finished AFTER baseline window ➜ behind schedule
-        if v >= 0:
-            return 'On Time'  # 0‒1 business‑day variance ➜ basically on time
-        return 'Ahead'        # finished BEFORE baseline ➜ ahead of schedule
+    def bucket(v: float) -> str:
+        if v >= 1:
+            return 'Ahead'
+        if v >= -1:
+            return 'On Time'
+        return 'Delayed'
 
     summary = pd.DataFrame({
         'PNOC ID': bsa.index,
-        'BSA (Avg Days)': bsa.values,
-        'Category': [category(v) for v in bsa.values]
+        'Variance (Bus Days)': bsa.values,
+        'Bucket': [bucket(v) for v in bsa.values]
     })
-    return bsa, summary
+    return summary
 
 # ---------------------------------------------------
 #  Streamlit UI
@@ -107,6 +108,7 @@ def main():
     st.set_page_config(page_title='Advanced Coordinated Analysis', layout='wide')
     st.title('Advanced Coordinated Analysis (ACA)')
 
+    # ---- sidebar upload ----
     st.sidebar.header('1. Upload your Excel')
     upload = st.sidebar.file_uploader('PNOCs 2024‑2025 .xlsm', type=['xls','xlsx','xlsm'])
     if not upload:
@@ -115,31 +117,40 @@ def main():
 
     df = load_and_clean(upload.read())
 
+    # ---- sidebar filters ----
     st.sidebar.header('2. Filter PNOC Type')
     types = st.sidebar.multiselect('Choose PNOC categories', ['Routine','Critical'], default=['Routine','Critical'])
     st.sidebar.header('3. FAN review cycles')
     min_fans = st.sidebar.number_input('Min FAN reviews', min_value=4, value=4, step=1)
 
     if st.sidebar.button('Run Analysis'):
-        bsa, summary = analyze(df, types, min_fans)
+        summary = analyze(df, types, min_fans)
         if summary is None:
             st.warning('No data left after filtering / date cleanup. Try different filters or inspect your input file.')
             return
+
+        # dynamic diverging color scale centred at 0
+        max_abs = max(1, abs(summary['Variance (Bus Days)']).max())
 
         import altair as alt
         chart = (
             alt.Chart(summary)
                .mark_bar()
                .encode(
-                    x=alt.X('PNOC ID', sort='-y'),
-                    y='BSA (Avg Days)',
-                    color=alt.Color('Category', scale=alt.Scale(domain=['Ahead','On Time','Delayed'], range=['green','gold','crimson']))
+                    x=alt.X('PNOC ID:N', sort='-y', title='PNOC ID'),
+                    y=alt.Y('Variance (Bus Days):Q', title='Schedule Variance (Business Days)'),
+                    color=alt.Color('Variance (Bus Days):Q',
+                                    scale=alt.Scale(domain=[-max_abs, 0, max_abs],
+                                                    range=['crimson','lightgrey','seagreen']),
+                                    legend=alt.Legend(title='Variance')),
+                    tooltip=['PNOC ID','Variance (Bus Days)','Bucket']
                )
-               .properties(width=850, height=400)
+               .properties(width=900, height=450)
         )
 
-        st.subheader('Baseline vs. Actual ▶️ BSA per PNOC')
+        st.subheader('Schedule Variance ▶️ Actual vs Baseline (Business Days)')
         st.altair_chart(chart, use_container_width=True)
+
         st.subheader('Detailed Summary Table')
         st.dataframe(summary.set_index('PNOC ID'))
 
@@ -148,3 +159,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
