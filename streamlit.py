@@ -47,7 +47,7 @@ US_HOL_2024 = np.array([
 ], dtype='datetime64[D]')
 
 def schedule_variance(baseline: pd.Series, actual: pd.Series) -> np.ndarray:
-    """Return working‑day variance *Actual − Baseline* (late ⇒ −, early ⇒ +)."""
+    """Return working‑day variance *Actual − Baseline* (late ⇒ −, early ⇒ +)."""
     valid = baseline.notna() & actual.notna()
     result = np.full(len(baseline), np.nan)
     if valid.any():
@@ -71,13 +71,13 @@ def analyze(df: pd.DataFrame, types: list[str], min_fans: int):
 
     df = df[df['Total FAN Reviews'] >= min_fans]
     if df.empty:
-        return None, None
+        return None
 
     df = df.copy()
     df['Schedule_Variance'] = schedule_variance(df['Baseline'], df['Actual'])
     df = df.dropna(subset=['Schedule_Variance'])
     if df.empty:
-        return None, None
+        return None
 
     # mean variance per PNOC
     bsa = (
@@ -110,7 +110,7 @@ def main():
 
     # ---- sidebar upload ----
     st.sidebar.header('1. Upload your Excel')
-    upload = st.sidebar.file_uploader('PNOCs 2024‑2025 .xlsm', type=['xls','xlsx','xlsm'])
+    upload = st.sidebar.file_uploader('PNOCs 2024-2025 .xlsm', type=['xls','xlsx','xlsm'])
     if not upload:
         st.info('🔍 Please upload your PNOCs Excel file to get started.')
         return
@@ -124,16 +124,13 @@ def main():
     min_fans = st.sidebar.number_input('Min FAN reviews', min_value=4, value=4, step=1)
 
     if st.sidebar.button('Run Analysis'):
-        result = analyze(df, types, min_fans)
-        if result is None:
+        summary = analyze(df, types, min_fans)
+        if summary is None or summary.empty:
             st.warning('No data left after filtering / date cleanup. Try different filters or inspect your input file.')
             return
 
-                # result from analyze() is a DataFrame (or None already handled above)
-        summary = result  # <- guaranteed DataFrame
-
         # dynamic diverging color scale centred at 0
-        max_abs = max(1, abs(summary['Variance (Bus Days)']).max()) max(1, abs(summary['Variance (Bus Days)']).max())
+        max_abs = max(1, abs(summary['Variance (Bus Days)']).max())
 
         import altair as alt
         chart = (
@@ -157,11 +154,11 @@ def main():
 
         st.subheader('Detailed Summary Table')
         st.dataframe(summary.set_index('PNOC ID'))
-        st.dataframe(summary.set_index('PNOC ID'))
 
     st.sidebar.markdown('---')
     st.sidebar.write('© Your Team – Advanced Coordinated Analysis')
 
 if __name__ == '__main__':
     main()
+
 
