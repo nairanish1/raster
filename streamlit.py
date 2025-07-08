@@ -79,11 +79,11 @@ def load_data(excel_bytes: bytes) -> pd.DataFrame | None:
         .merge(df_group[['PNOC ID','Group']], on='PNOC ID', how='left')
     )
 
-    # Fill NA
-    df['CI'] = df['CI'].fillna(0)
-    df['RM'] = df['RM'].fillna(0)
-    df['critical'] = df['critical'].fillna('N')
-    df['Group'] = df['Group'].fillna('')
+        # Fill NA & enforce numeric
+    df['CI'] = pd.to_numeric(df['CI'], errors='coerce').fillna(0).astype(int)
+    df['RM'] = pd.to_numeric(df['RM'], errors='coerce').fillna(0).astype(int)
+    df['critical']   = df['critical'].fillna('N')
+    df['Group']      = df['Group'].fillna('')
     df['Contractor'] = df['Contractor'].fillna('')
 
     # Compute FAN reviews
@@ -200,7 +200,5 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
 
 
