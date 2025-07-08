@@ -28,11 +28,19 @@ def load_data(excel_bytes: bytes) -> pd.DataFrame:
     df_main['Actual']   = pd.to_datetime(df_main['Actual'],   format="%m/%d/%Y", errors="coerce")
 
     # Merge all into one table
+    # Prepare CIRM sheet, ensure Contractor col exists
+    df_cirm = df_cirm.copy()
+    if 'Contractor' not in df_cirm.columns:
+        df_cirm['Contractor'] = ''
+
+    # Merge all into one table
     df = (
         df_main
         .merge(df_crit[['PNOC ID','critical']], on='PNOC ID', how='left')
-        .merge(df_cirm[['PNOC ID','CI','RM','Contractor']], on='PNOC ID', how='left')  # assumes CIRM has Contractor
+        .merge(df_cirm[['PNOC ID','CI','RM','Contractor']], on='PNOC ID', how='left')
         .merge(df_group[['PNOC ID','Group']], on='PNOC ID', how='left')
+    )
+[['PNOC ID','Group']], on='PNOC ID', how='left')
     )
 
     # Fill NA in numeric
@@ -64,7 +72,7 @@ def bus_variance(baseline: pd.Series, actual: pd.Series) -> np.ndarray:
 #  KPI Pages
 # ---------------------------------------------------
 def page_home():
-    st.image('logo.png', width=200)
+    st.image('logo.png', width=600)
     st.markdown("""
     **Advanced Coordinated Analysis (ACA)** is your one-stop tool for tracking PNOC performance across three KPI dashboards:
     1. **Baseline Schedule Analysis (BSA)** – monitor schedule variance vs. baseline
@@ -160,6 +168,7 @@ def main():
 
 if __name__=='__main__':
     main()
+
 
 
 
