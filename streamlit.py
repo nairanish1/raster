@@ -4,35 +4,74 @@ import numpy as np
 from datetime import datetime
 import io
 
-# ---------------------------------------------------
-#  Load & clean data
-# ---------------------------------------------------
-@st.cache_data
-def load_data(excel_bytes: bytes) -> pd.DataFrame:
-    xls = pd.ExcelFile(io.BytesIO(excel_bytes))
-    # Main schedule sheet
-    df_main = pd.read_excel(xls, sheet_name="Baseline + Actual Dates")
-    # Critical flag
-    df_crit = pd.read_excel(xls, sheet_name="Need date and critical status")
-    # Comments/Resolution
-    df_cirm = pd.read_excel(xls, sheet_name="CIRM")
-    # Group classification
-    df_group = pd.read_excel(xls, sheet_name="Group + Days Passed")
+############################################################
+# Robust utility helpers
+############################################################
+REQUIRED_SHEETS = {
+    'main': "Baseline + Actual Dates",
+    'crit': "Need date and critical status",
+    'cirm': "CIRM",
+    'group': "Group + Days Passed",
+}
 
-    # Standardize PNOC ID
+US_HOL_2024 = np.array([
+    datetime(2024,1,1), datetime(2024,1,15), datetime(2024,5,27),
+    datetime(2024,7,4), datetime(2024,9,2), datetime(2024,10,14),
+    datetime(2024,11,11), datetime(2024,11,28), datetime(2024,12,25)
+], dtype="datetime64[D]")
+
+############################################################
+# Data‑loading (safe)
+############################################################
+@st.cache_data(show_spinner=False)
+def load_data(excel_bytes: bytes) -> pd.DataFrame | None:
+    """Return a merged DataFrame or None if unrecoverable error."""
+    try:
+        xls = pd.ExcelFile(io.BytesIO(excel_bytes))
+    except Exception as exc:
+        st.error(f"Unable to read Excel file: {exc}")
+        return None
+
+    # Helper to read a sheet safely
+    def safe_read(name: str) -> pd.DataFrame:
+        try:
+            return pd.read_excel(xls, sheet_name=name)
+        except ValueError:
+            st.warning(f"Sheet “{name}” not found – using empty frame.")
+            return pd.DataFrame()
+
+    df_main  = safe_read(REQUIRED_SHEETS['main'])
+    df_crit  = safe_read(REQUIRED_SHEETS['crit'])
+    df_cirm  = safe_read(REQUIRED_SHEETS['cirm'])
+    df_group = safe_read(REQUIRED_SHEETS['group'])
+
+    # Guarantee PNOC ID col exists
     for df in (df_main, df_crit, df_cirm, df_group):
+        if 'PNOC ID' not in df.columns:
+            df['PNOC ID'] = []
         df['PNOC ID'] = df['PNOC ID'].astype(str).str.strip()
 
-    # Parse dates
-    df_main['Baseline'] = pd.to_datetime(df_main['Baseline'], format="%m/%d/%Y", errors="coerce")
-    df_main['Actual']   = pd.to_datetime(df_main['Actual'],   format="%m/%d/%Y", errors="coerce")
+    # Date parsing
+    for col in ('Baseline','Actual'):
+        if col in df_main.columns:
+            df_main[col] = pd.to_datetime(df_main[col], errors='coerce')
+        else:
+            df_main[col] = pd.NaT
 
-        # Merge all into one table
-    # Ensure Contractor column exists
-    df_cirm = df_cirm.copy()
-    if 'Contractor' not in df_cirm.columns:
-        df_cirm['Contractor'] = ''
+    # Ensure critical column
+    if 'critical' not in df_crit.columns:
+        df_crit['critical'] = np.nan
 
+    # Ensure CI / RM / Contractor cols
+    for col in ('CI','RM','Contractor'):
+        if col not in df_cirm.columns:
+            df_cirm[col] = 0 if col in ('CI','RM') else ''
+
+    # Ensure Group col
+    if 'Group' not in df_group.columns:
+        df_group['Group'] = ''
+
+    # Merge
     df = (
         df_main
         .merge(df_crit[['PNOC ID','critical']], on='PNOC ID', how='left')
@@ -40,133 +79,127 @@ def load_data(excel_bytes: bytes) -> pd.DataFrame:
         .merge(df_group[['PNOC ID','Group']], on='PNOC ID', how='left')
     )
 
-    # Fill NA in numeric
+    # Fill NA
     df['CI'] = df['CI'].fillna(0)
     df['RM'] = df['RM'].fillna(0)
+    df['critical'] = df['critical'].fillna('N')
+    df['Group'] = df['Group'].fillna('')
+    df['Contractor'] = df['Contractor'].fillna('')
+
+    # Compute FAN reviews
     df['Total FAN Reviews'] = 4 + df['RM'].apply(lambda x: 1 if x>0 else 0) + df['CI'].apply(lambda x: max(0, x-1))
 
     return df
 
-# ---------------------------------------------------
-#  Business-day variance: Actual -> Baseline (busdays)
-# ---------------------------------------------------
-US_HOL_2024 = np.array([
-    datetime(2024,1,1), datetime(2024,1,15), datetime(2024,5,27),
-    datetime(2024,7,4), datetime(2024,9,2), datetime(2024,10,14),
-    datetime(2024,11,11), datetime(2024,11,28), datetime(2024,12,25)
-], dtype='datetime64[D]')
-
+############################################################
+# Business‑day variance
+############################################################
 def bus_variance(baseline: pd.Series, actual: pd.Series) -> np.ndarray:
     valid = baseline.notna() & actual.notna()
-    var = np.full(len(baseline), np.nan)
+    out = np.full(len(baseline), np.nan)
     if valid.any():
         b = baseline[valid].dt.normalize().values.astype('datetime64[D]')
         a = actual[valid].dt.normalize().values.astype('datetime64[D]')
-        var[valid] = np.busday_count(a, b, holidays=US_HOL_2024)
-    return var
+        out[valid] = np.busday_count(a, b, holidays=US_HOL_2024)
+    return out
 
-# ---------------------------------------------------
-#  KPI Pages
-# ---------------------------------------------------
+############################################################
+# Page: Home
+############################################################
+
 def page_home():
     st.image('logo.png', width=600)
     st.markdown("""
-    **Advanced Coordinated Analysis (ACA)** is your one-stop tool for tracking PNOC performance across three KPI dashboards:
-    1. **Baseline Schedule Analysis (BSA)** – monitor schedule variance vs. baseline
-    2. **Phase-based Average Delay** – track per-phase delays (coming soon)
-    3. **Comment Resolution Time** – assess comment & resolution responsiveness (coming soon)
+    ### Advanced Coordinated Analysis (ACA)
+    Monitor PNOC performance across three KPI dashboards:
+    1. **Baseline Schedule Analysis (BSA)** – schedule variance
+    2. **Phase‑based Average Delay** – coming soon
+    3. **Comment Resolution Time** – coming soon
     """)
-    col1, col2, col3 = st.columns(3)
-    if col1.button('🗓️ Baseline Schedule Analysis'):
+    c1, c2, c3 = st.columns(3)
+    if c1.button('🗓️ Baseline Schedule Analysis'):
         st.session_state.page = 'bsa'
-    if col2.button('⏳ Phase-based Average Delay'):
-        st.warning('Phase-based Delay KPI coming soon!')
-    if col3.button('✉️ Comment Resolution Time'):
-        st.warning('Comment Resolution KPI coming soon!')
+    if c2.button('⏳ Phase‑based Average Delay'):
+        st.info('Coming soon!')
+    if c3.button('✉️ Comment Resolution Time'):
+        st.info('Coming soon!')
 
+############################################################
+# Page: BSA
+############################################################
 
 def page_bsa(df: pd.DataFrame):
     st.header('Baseline Schedule Analysis')
-    c1, c2 = st.columns([3,1])
-    with c2:
-        if st.button('⬅️ Back'): st.session_state.page = 'home'
-    # Filters
-    st.subheader('Filters')
-    g_opts = sorted(df['Group'].dropna().unique())
-    sel_group = st.multiselect('Contractor Group', g_opts, default=g_opts)
-    t_opts = ['Routine','Critical']
-    sel_type = st.multiselect('PNOC Type', t_opts, default=t_opts)
-    ci = st.number_input('Min Comment Issues (CI)', min_value=0, step=1, value=0)
-    rm = st.number_input('Min Resolution Messages (RM)', min_value=0, step=1, value=0)
-    contractors = sorted(df['Contractor'].dropna().unique())
-    sel_con = st.multiselect('Contractors', contractors, default=contractors)
-    over120 = st.selectbox('120-day Issuance Filter', ['All','>120 days','≤120 days'])
+    if st.button('⬅️ Home'): st.session_state.page = 'home'; return
 
-    # Apply filters
-    d = df[df['Group'].isin(sel_group)]
-    d = d[d['critical'].map(lambda x: ('Critical' in sel_type) if x=='Y' else ('Routine' in sel_type))]
-    d = d[d['CI']>=ci]
-    d = d[d['RM']>=rm]
-    d = d[d['Contractor'].isin(sel_con)]
-    # Compute variance
+    # ---------- Filters ----------
+    st.subheader('Filter criteria')
+    sel_groups = st.multiselect('Group', sorted(df['Group'].unique()), default=list(df['Group'].unique()))
+    sel_types  = st.multiselect('PNOC Type', ['Routine','Critical'], default=['Routine','Critical'])
+    min_ci     = st.number_input('Min Comment Issues (CI)', 0, step=1)
+    min_rm     = st.number_input('Min Resolution Messages (RM)', 0, step=1)
+    sel_con    = st.multiselect('Contractor(s)', sorted(df['Contractor'].unique()), default=list(df['Contractor'].unique()))
+    over120opt = st.selectbox('120‑day Issuance Filter', ['All','>120 days','≤120 days'])
+
+    # ---------- Apply filters ----------
+    d = df.copy()
+    if sel_groups:    d = d[d['Group'].isin(sel_groups)]
+    if sel_types:
+        d = d[d['critical'].apply(lambda x: ('Critical' in sel_types) if x=='Y' else ('Routine' in sel_types))]
+    d = d[(d['CI']>=min_ci) & (d['RM']>=min_rm)]
+    if sel_con:       d = d[d['Contractor'].isin(sel_con)]
+
+    # ---------- Variance ----------
     d['Variance'] = bus_variance(d['Baseline'], d['Actual'])
-    # Average per PNOC
-    summary = (
-        d.groupby('PNOC ID')['Variance']
-         .mean()
-         .rename('Variance (Bus Days)')
-         .reset_index()
-    )
-    # 120-day filter
-    if over120=='>120 days': summary = summary[summary['Variance']<=-120]
-    if over120=='≤120 days': summary = summary[summary['Variance']>-120]
-    if summary.empty:
-        st.warning('No PNOCs match these filters')
-        return
-    # Bucket
-    def bucket(v):
-        if v>=1: return 'Ahead'
-        if v>=-1: return 'On Time'
-        return 'Delayed'
-    summary['Bucket'] = summary['Variance'].apply(bucket)
+    summary = d.groupby('PNOC ID')['Variance'].mean().dropna().rename('Variance').to_frame().reset_index()
 
-    # Chart
-    max_abs = max(1, abs(summary['Variance']).max())
+    if over120opt=='>120 days': summary = summary[summary['Variance']<=-120]
+    if over120opt=='≤120 days': summary = summary[summary['Variance']>-120]
+
+    if summary.empty:
+        st.warning('No PNOCs match your filters.')
+        return
+
+    # Bucket & chart
+    summary['Bucket'] = summary['Variance'].apply(lambda v: 'Ahead' if v>=1 else ('On Time' if v>=-1 else 'Delayed'))
     import altair as alt
     chart = alt.Chart(summary).mark_bar().encode(
         x=alt.X('PNOC ID:N', sort='-y'),
         y=alt.Y('Variance:Q', title='Variance (Bus Days)'),
         color=alt.Color('Variance:Q', scale=alt.Scale(scheme='redyellowgreen', domainMid=0)),
         tooltip=['PNOC ID','Variance','Bucket']
-    ).properties(width=800, height=400)
-    st.altair_chart(chart)
+    ).properties(height=400)
+    st.altair_chart(chart, use_container_width=True)
     st.dataframe(summary.set_index('PNOC ID'))
 
-# ---------------------------------------------------
-#  Main app
-# ---------------------------------------------------
+############################################################
+# Main app logic
+############################################################
+
 def main():
     st.set_page_config(page_title='ACA', layout='wide')
-    if 'page' not in st.session_state: st.session_state.page = 'home'
-    st.sidebar.title('ACA Navigation')
-    nav = st.sidebar.radio('', ['Home','Baseline Schedule Analysis'])
-    st.session_state.page = 'home' if nav=='Home' else 'bsa'
-    upload = None
+    if 'page' not in st.session_state:
+        st.session_state.page = 'home'
+
+    # Sidebar navigation
+    page_choice = st.sidebar.radio('Navigation', ['Home','Baseline Schedule Analysis'])
+    st.session_state.page = 'home' if page_choice=='Home' else 'bsa'
+
     if st.session_state.page=='home':
         page_home()
     else:
-        if upload is None:
-            upload = st.file_uploader('Upload PNOCs .xlsm', type=['xls','xlsx','xlsm'])
-        if upload:
-            df = load_data(upload.read())
-            page_bsa(df)
-        else:
-            st.sidebar.info('Please upload your file to continue.')
+        upl = st.sidebar.file_uploader('Upload PNOCs Excel (.xls/.xlsx/.xlsm)', type=['xls','xlsx','xlsm'])
+        if not upl:
+            st.info('Please upload your Excel file to continue.')
+            return
+        df = load_data(upl.read())
+        if df is None or df.empty:
+            st.error('No valid data loaded. Check your file and sheet names.')
+            return
+        page_bsa(df)
 
-if __name__=='__main__':
+if __name__ == '__main__':
     main()
-
-
 
 
 
