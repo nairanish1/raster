@@ -8,90 +8,89 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.inspection import permutation_importance
 from sklearn.model_selection import (
-    cross_val_score,
     RepeatedKFold,
     KFold,
     LeaveOneOut,
     RandomizedSearchCV,
+    cross_val_score,
 )
 from sklearn.preprocessing import MultiLabelBinarizer
 
-# ---------- CONFIG ----------
+# ---------- CONFIG (adjust paths if needed) ----------
 EXPECTED_ACTUAL_CSV = r"C:\Users\anish.nair\Downloads\Expected_and_Actual_Milestones.csv"
 PNOC_FEATURES_CSV = r"C:\Users\anish.nair\Downloads\Merged_PNOC_Data.csv"
-OUTPUT_DIR = Path("feature_importances_nested_rf_fixed")  # output directory
+OUTPUT_DIR = Path("feature_importances_nested_cv")  # output directory
 
+NUMERIC_IMPUTE_COLS = [
+    'CI', 'RM', 'Total CI Closed', 'Avg Days', 'Total CI Late',
+    'Total Critical CI Closed', 'Total Critical CI Late',
+    'Total RM Closed', 'Total RM Late', 'Avg Days to close a RM'
+]
+CENTROID_COLS = ['Predicted 120 Centroid', 'Predicted Purpose Centroid']
 CANONICAL_MILESTONES = [
-    "PNOC/CI Issued",
-    "R&C Due",
-    "Enter TA",
-    "Branch TA",
-    "Staff TA/Au Due",
-    "NOC Issued",
-    "Revision Issued",
+    "PNOC/CI Issued", "R&C Due", "Enter TA", "Branch TA",
+    "Staff TA/Au Due", "NOC Issued", "Revision Issued"
 ]
 
-# Hyperparameter search space
+# hyperparameter space
 PARAM_DIST = {
-    "n_estimators": [100, 200, 500],
-    "max_depth": [None, 5, 10, 20],
-    "min_samples_leaf": [1, 2, 4],
-    "max_features": ["sqrt", "log2", 0.5],
+    'n_estimators': [100, 200, 500],
+    'max_depth': [None, 5, 10, 20],
+    'min_samples_leaf': [1, 2, 4],
+    'max_features': ['sqrt', 'log2', 0.5],
 }
 
-
-# ---------- HELPERS ----------
+# ---------- UTILITIES ----------
 def safe_filename(s: str) -> str:
-    return re.sub(r"[\\/:\*\?\"<>\| ]+", "_", s)
+    return re.sub(r'[\\/:"*?<>| ]+', '_', s)
 
-
-def choose_outer_cv(n: int):
-    if n >= 100:
+def get_outer_cv(n_samples: int):
+    if n_samples >= 100:
         return RepeatedKFold(n_splits=5, n_repeats=3, random_state=42)
-    if n >= 50:
+    if n_samples >= 50:
         return RepeatedKFold(n_splits=5, n_repeats=2, random_state=42)
-    if n >= 20:
+    if n_samples >= 20:
         return RepeatedKFold(n_splits=4, n_repeats=2, random_state=42)
     return LeaveOneOut()
 
-
-def choose_inner_cv(n: int):
-    if n >= 50:
+def get_inner_cv(n_samples: int):
+    if n_samples >= 50:
         return KFold(n_splits=4, shuffle=True, random_state=1)
-    if n >= 20:
+    if n_samples >= 20:
         return KFold(n_splits=3, shuffle=True, random_state=1)
     return LeaveOneOut()
 
-
 # ---------- DATA PREPROCESSING ----------
-def load_expected_actual_diffs(path: str) -> pd.DataFrame:
+def load_and_preprocess_expected_actual(path: str):
     df = pd.read_csv(path, low_memory=False)
-    required = {"PNOC ID", "Process", "Expected", "Actual"}
+    required = {'PNOC ID', 'Process', 'Expected', 'Actual'}
     if not required.issubset(df.columns):
-        raise ValueError(f"Expected/Actual file missing columns: {required - set(df.columns)}")
+        missing = required - set(df.columns)
+        raise ValueError(f"Expected/Actual file missing columns: {missing}")
 
-    df["PNOC ID"] = df["PNOC ID"].astype(str).str.strip()
-    df["Process"] = (
-        df["Process"].astype(str)
-        .str.replace(r"\s*/\s*", "/", regex=True)
-        .str.strip()
-    )
-    df["Process"] = df["Process"].replace({r"PNOC/?\s*CI Issued": "PNOC/CI Issued"}, regex=True)
-    df = df[df["Process"].isin(CANONICAL_MILESTONES)].copy()
+    df['PNOC ID'] = df['PNOC ID'].astype(str).str.strip()
+    df['Process'] = df['Process'].astype(str).str.replace(r"\s*/\s*", "/", regex=True).str.strip()
+    df['Process'] = df['Process'].replace({r"PNOC/?\s*CI Issued": "PNOC/CI Issued"}, regex=True)
+    df = df[df['Process'].isin(CANONICAL_MILESTONES)].copy()
 
-    df["Actual"] = pd.to_datetime(df["Actual"], errors="coerce")
-    df["Expected"] = pd.to_datetime(df["Expected"], errors="coerce")
-    df["variance"] = (df["Actual"] - df["Expected"]).dt.total_seconds() / (60 * 60 * 24)
+    df['Actual'] = pd.to_datetime(df['Actual'], errors='coerce')
+    df['Expected'] = pd.to_datetime(df['Expected'], errors='coerce')
+    df['variance'] = (df['Actual'] - df['Expected']).dt.total_seconds() / (60 * 60 * 24)
 
-    df["Process"] = pd.Categorical(df["Process"], categories=CANONICAL_MILESTONES, ordered=True)
-    df = df.sort_values(["PNOC ID", "Process"])
+    df['Process'] = pd.Categorical(df['Process'], categories=CANONICAL_MILESTONES, ordered=True)
+    df = df.sort_values(['PNOC ID', 'Process'])
 
     var_wide = (
-        df.groupby(["PNOC ID", "Process"], observed=True)["variance"]
-        .first()
-        .unstack("Process")
-        .reindex(columns=CANONICAL_MILESTONES)
+        df.groupby(['PNOC ID', 'Process'], observed=True)['variance']
+          .first()
+          .unstack('Process')
+          .reindex(columns=CANONICAL_MILESTONES)
     )
+
+    milestone_variance_dfs = {
+        milestone: var_wide[[milestone]].reset_index().rename(columns={milestone: 'variance'})
+        for milestone in CANONICAL_MILESTONES
+    }
 
     diffs = {}
     for i in range(1, len(CANONICAL_MILESTONES)):
@@ -103,258 +102,275 @@ def load_expected_actual_diffs(path: str) -> pd.DataFrame:
         else:
             diffs[col_name] = pd.Series(np.nan, index=var_wide.index)
     ea_diff_df = pd.DataFrame(diffs)
-    ea_diff_df.index.name = "PNOC ID"
+    ea_diff_df.index.name = 'PNOC ID'
     ea_diff_df = ea_diff_df.reset_index()
-    return ea_diff_df
+    return ea_diff_df, milestone_variance_dfs
 
-
-def load_all_features(path: str) -> pd.DataFrame:
+def load_and_preprocess_features(path: str):
     df = pd.read_csv(path, low_memory=False)
-    if "PNOC ID" not in df.columns:
+    if 'PNOC ID' not in df.columns:
         raise ValueError("Features file missing 'PNOC ID' column")
-    df["PNOC ID"] = df["PNOC ID"].astype(str).str.strip()
+    df['PNOC ID'] = df['PNOC ID'].astype(str).str.strip()
 
-    # Multi-label Requestor(s)
-    if "Requestor(s)" in df.columns:
+    # fill/encode critical and group
+    for col in ['critical', 'Group']:
+        if col in df.columns:
+            df[col] = df[col].fillna('Unknown').astype(str)
+        else:
+            df[col] = 'Unknown'
+
+    # numeric imputes
+    for col in NUMERIC_IMPUTE_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        else:
+            df[col] = np.nan
+    num_imputer = SimpleImputer(strategy='median')
+    df[NUMERIC_IMPUTE_COLS] = num_imputer.fit_transform(df[NUMERIC_IMPUTE_COLS])
+
+    # centroid one-hot
+    for cc in CENTROID_COLS:
+        if cc in df.columns:
+            dummies = pd.get_dummies(df[cc].astype(str), prefix=cc.replace(" ", "_"))
+            df = pd.concat([df, dummies], axis=1)
+
+    # one-hot critical and group
+    if 'critical' in df.columns:
+        df = pd.concat([df, pd.get_dummies(df['critical'].astype(str), prefix='critical')], axis=1)
+    if 'Group' in df.columns:
+        df = pd.concat([df, pd.get_dummies(df['Group'].astype(str), prefix='Group')], axis=1)
+
+    # multi-label requestor(s)
+    if 'Requestor(s)' in df.columns:
         def split_requestors(x):
             if pd.isna(x):
                 return []
-            parts = re.split(r"[;,]", str(x))
+            parts = re.split(r'[;,]', str(x))
             return [p.strip() for p in parts if p.strip()]
-        req_lists = df["Requestor(s)"].apply(split_requestors)
+        req_lists = df['Requestor(s)'].apply(split_requestors)
         mlb = MultiLabelBinarizer(sparse_output=False)
         if req_lists.map(len).sum() > 0:
             req_encoded = pd.DataFrame(
                 mlb.fit_transform(req_lists),
                 columns=[f"Requestor_{c}" for c in mlb.classes_],
-                index=df.index,
+                index=df.index
             )
             df = pd.concat([df, req_encoded], axis=1)
-        df = df.drop(columns=["Requestor(s)"], errors="ignore")
 
-    # Try coercing object columns that are mostly numeric
-    for col in df.columns:
-        if col == "PNOC ID":
-            continue
-        if df[col].dtype == object:
-            coerced = pd.to_numeric(df[col], errors="coerce")
-            if coerced.notna().sum() / max(1, len(coerced)) >= 0.9:
-                df[col] = coerced
+    # drop originals
+    drop_cols = ['critical', 'Group'] + [c for c in CENTROID_COLS if c in df.columns] + ['Requestor(s)']
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
 
-    # Numeric columns
-    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
-    if numeric_cols:
-        imputer = SimpleImputer(strategy="median")
-        df[numeric_cols] = imputer.fit_transform(df[numeric_cols])
-
-    # Categorical remaining
-    obj_cols = [c for c in df.select_dtypes(include=["object", "category"]).columns if c != "PNOC ID"]
-    for c in obj_cols:
-        df[c] = df[c].fillna("Unknown").astype(str)
-    if obj_cols:
-        df = pd.get_dummies(df, columns=obj_cols, drop_first=True)
-
-    # Deduplicate
-    if df["PNOC ID"].duplicated().any():
-        numeric_now = df.select_dtypes(include=["number"]).columns.tolist()
-        non_numeric = [c for c in df.columns if c not in numeric_now and c != "PNOC ID"]
-        agg_map = {c: "mean" for c in numeric_now}
-        agg_map.update({c: "first" for c in non_numeric})
-        df = df.groupby("PNOC ID", as_index=False).agg(agg_map)
+    # dedupe
+    if df['PNOC ID'].duplicated().any():
+        numeric = df.select_dtypes(include=["number"]).columns.tolist()
+        non_numeric = [c for c in df.columns if c not in numeric and c != 'PNOC ID']
+        agg_map = {c: 'mean' for c in numeric}
+        agg_map.update({c: 'first' for c in non_numeric})
+        df = df.groupby('PNOC ID', as_index=False).agg(agg_map)
 
     return df
 
+def merge_features_targets(features_df: pd.DataFrame, target_df: pd.DataFrame):
+    return target_df.merge(features_df, on='PNOC ID', how='inner')
 
-# ---------- MODELING ----------
-def train_target_nested_rf(X: pd.DataFrame, y: pd.Series):
-    mask = ~y.isna()
-    X = X.loc[mask]
-    y = y.loc[mask].astype(float)
-    n = len(y)
-    if n == 0:
-        return None
+# ---------- MODEL TRAINING & IMPORTANCE WITH NESTED CV ----------
+def train_and_get_importances(merged: pd.DataFrame, random_state=42):
+    target_cols = [c for c in merged.columns if c.startswith("EA_diff_")]
+    X_base = merged.drop(columns=['PNOC ID'] + target_cols)
 
-    outer_cv = choose_outer_cv(n)
-    inner_cv = choose_inner_cv(n)
+    # one-hot remaining object-like columns
+    obj_cols = X_base.select_dtypes(include=['object', 'category']).columns.tolist()
+    if obj_cols:
+        X_base = pd.get_dummies(X_base, columns=obj_cols, drop_first=True)
 
-    outer_r2s = []
-    impurity_accum = defaultdict(list)
-    perm_accum = defaultdict(list)
+    results = {}
+    for target in target_cols:
+        y = merged[target].astype(float)
+        X = X_base.copy()
+        mask = ~y.isna()
+        X = X.loc[mask]
+        y = y.loc[mask]
+        n = len(y)
+        if n == 0:
+            print(f"[WARN] skipping {target}: no valid target examples.")
+            continue
 
-    best_params_list = []
+        # nested CV: outer for performance, inner for tuning
+        outer_cv = get_outer_cv(n)
+        inner_cv = get_inner_cv(n)
 
-    for train_idx, test_idx in outer_cv.split(X, y):
-        X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
-        y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
+        outer_r2s = []
+        # accumulate importances over outer folds
+        impurity_accum = defaultdict(list)
+        perm_accum = defaultdict(list)
+        best_params = []
 
-        base = RandomForestRegressor(random_state=42)
-        search = RandomizedSearchCV(
-            base,
+        for train_idx, test_idx in outer_cv.split(X, y):
+            X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
+            y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
+
+            base = RandomForestRegressor(random_state=random_state)
+            search = RandomizedSearchCV(
+                base,
+                param_distributions=PARAM_DIST,
+                n_iter=25,
+                scoring='r2',
+                cv=inner_cv,
+                n_jobs=-1,
+                random_state=random_state,
+                verbose=0
+            )
+            search.fit(X_tr, y_tr)
+            best = search.best_estimator_
+            best_params.append(tuple(sorted(search.best_params_.items())))
+
+            r2_outer = best.score(X_te, y_te)
+            outer_r2s.append(r2_outer)
+
+            # impurity importances from fitted best
+            if hasattr(best, 'feature_importances_'):
+                for feat, imp in zip(X_tr.columns, best.feature_importances_):
+                    impurity_accum[feat].append(imp)
+
+            # permutation importance on outer test
+            perm = permutation_importance(best, X_te, y_te, n_repeats=10, random_state=random_state, n_jobs=-1)
+            for feat, imp_mean in zip(X_te.columns, perm.importances_mean):
+                perm_accum[feat].append(imp_mean)
+
+        nested_cv_r2_mean = np.mean(outer_r2s)
+        nested_cv_r2_std = np.std(outer_r2s)
+
+        # aggregate into DataFrame
+        features = sorted(set(list(impurity_accum.keys()) + list(perm_accum.keys())))
+        summary_rows = []
+        for feat in features:
+            imp_list = impurity_accum.get(feat, [])
+            perm_list = perm_accum.get(feat, [])
+            summary_rows.append({
+                'feature': feat,
+                'avg_impurity_importance': np.mean(imp_list) if imp_list else 0.0,
+                'std_impurity_importance': np.std(imp_list) if imp_list else 0.0,
+                'avg_permutation_importance': np.mean(perm_list) if perm_list else 0.0,
+                'std_permutation_importance': np.std(perm_list) if perm_list else 0.0,
+            })
+        df_imp_agg = pd.DataFrame(summary_rows).sort_values('avg_permutation_importance', ascending=False).reset_index(drop=True)
+
+        # Determine final parameters (most frequent from outer folds)
+        if best_params:
+            most_common = Counter(best_params).most_common(1)[0][0]
+            final_params = dict(most_common)
+        else:
+            final_params = {}
+
+        # Fit final model on all data using tuned params via a secondary search to refine
+        # Here we do a final RandomizedSearchCV for stability using repeated CV
+        final_cv = RepeatedKFold(n_splits=5 if n >= 10 else max(2, n), n_repeats=2, random_state=7) if n >= 10 else LeaveOneOut()
+        final_search = RandomizedSearchCV(
+            RandomForestRegressor(random_state=random_state),
             param_distributions=PARAM_DIST,
-            n_iter=25,
-            scoring="r2",
-            cv=inner_cv,
+            n_iter=30,
+            scoring='r2',
+            cv=final_cv,
             n_jobs=-1,
-            random_state=42,
-            verbose=0,
+            random_state=random_state + 1,
+            verbose=0
         )
-        search.fit(X_tr, y_tr)
-        best = search.best_estimator_
-        best_params_list.append(tuple(sorted(search.best_params_.items())))
+        final_search.fit(X, y)
+        final_model = final_search.best_estimator_
 
-        r2_outer = best.score(X_te, y_te)
-        outer_r2s.append(r2_outer)
+        # Final CV metrics
+        final_cv_scores = cross_val_score(final_model, X, y, cv=final_cv, scoring='r2', n_jobs=-1)
+        final_cv_r2_mean = np.mean(final_cv_scores)
+        final_cv_r2_std = np.std(final_cv_scores)
 
-        # impurity importance (from trained tree)
-        if hasattr(best, "feature_importances_"):
-            for feat, imp in zip(X_tr.columns, best.feature_importances_):
-                impurity_accum[feat].append(imp)
+        # Final importances
+        final_impurity = {}
+        if hasattr(final_model, 'feature_importances_'):
+            for feat, imp in zip(X.columns, final_model.feature_importances_):
+                final_impurity[feat] = imp
+        final_perm_full = {}
+        perm_full = permutation_importance(final_model, X, y, n_repeats=15, random_state=random_state + 2, n_jobs=-1)
+        for feat, imp_mean in zip(X.columns, perm_full.importances_mean):
+            final_perm_full[feat] = imp_mean
 
-        # permutation importance on test fold
-        perm = permutation_importance(best, X_te, y_te, n_repeats=10, random_state=0, n_jobs=-1)
-        for feat, imp_mean in zip(X_te.columns, perm.importances_mean):
-            perm_accum[feat].append(imp_mean)
+        # Merge final into aggregated table
+        def safe_get(d, k):
+            return d[k] if k in d else 0.0
 
-    nested_cv_r2_mean = np.mean(outer_r2s)
-    nested_cv_r2_std = np.std(outer_r2s)
+        df_imp_agg['final_impurity_importance'] = df_imp_agg['feature'].apply(lambda f: safe_get(final_impurity, f))
+        df_imp_agg['final_permutation_importance'] = df_imp_agg['feature'].apply(lambda f: safe_get(final_perm_full, f))
 
-    # build summary DataFrame
-    features = sorted(set(list(impurity_accum.keys()) + list(perm_accum.keys())))
-    rows = []
-    for feat in features:
-        imp_list = impurity_accum.get(feat, [])
-        perm_list = perm_accum.get(feat, [])
-        rows.append({
-            "feature": feat,
-            "avg_impurity_importance": np.mean(imp_list) if imp_list else 0.0,
-            "std_impurity_importance": np.std(imp_list) if imp_list else 0.0,
-            "avg_permutation_importance": np.mean(perm_list) if perm_list else 0.0,
-            "std_permutation_importance": np.std(perm_list) if perm_list else 0.0,
-        })
-    summary_df = pd.DataFrame(rows).sort_values("avg_permutation_importance", ascending=False).reset_index(drop=True)
+        # Normalize columns for comparison
+        for col in ['avg_impurity_importance', 'avg_permutation_importance',
+                    'final_impurity_importance', 'final_permutation_importance']:
+            total = df_imp_agg[col].sum()
+            norm = f'{col}_norm'
+            df_imp_agg[norm] = df_imp_agg[col] / total if total > 0 else 0.0
 
-    # Final model: tune on entire available X,y
-    cv_for_final = RepeatedKFold(n_splits=5 if n >= 10 else max(2, n), n_repeats=2, random_state=7) if n >= 10 else LeaveOneOut()
-    final_search = RandomizedSearchCV(
-        RandomForestRegressor(random_state=42),
-        param_distributions=PARAM_DIST,
-        n_iter=30,
-        scoring="r2",
-        cv=cv_for_final,
-        n_jobs=-1,
-        random_state=1,
-        verbose=0,
-    )
-    final_search.fit(X, y)
-    final_model = final_search.best_estimator_
+        # human readable pair
+        pair_raw = target.replace("EA_diff_", "")
+        if "_to_" in pair_raw:
+            from_m, to_m = pair_raw.split("_to_")
+            milestone_pair_display = f"{from_m} → {to_m}"
+        else:
+            milestone_pair_display = target
 
-    final_cv_scores = cross_val_score(final_model, X, y, cv=cv_for_final, scoring="r2", n_jobs=-1)
-    final_cv_r2_mean = np.mean(final_cv_scores)
-    final_cv_r2_std = np.std(final_cv_scores)
+        # finalize table
+        df_final = df_imp_agg.copy()
+        df_final.insert(0, 'Milestone Pair', milestone_pair_display)
+        # append summary metrics columns to top row for clarity (as separate columns)
+        df_final['nested_cv_r2_mean'] = nested_cv_r2_mean
+        df_final['nested_cv_r2_std'] = nested_cv_r2_std
+        df_final['final_cv_r2_mean'] = final_cv_r2_mean
+        df_final['final_cv_r2_std'] = final_cv_r2_std
+        df_final['chosen_params'] = str(final_search.best_params_)
 
-    # Final importances
-    final_impurity = {}
-    if hasattr(final_model, "feature_importances_"):
-        for feat, imp in zip(X.columns, final_model.feature_importances_):
-            final_impurity[feat] = imp
-    final_perm_full = {}
-    perm_full = permutation_importance(final_model, X, y, n_repeats=15, random_state=2, n_jobs=-1)
-    for feat, imp_mean in zip(X.columns, perm_full.importances_mean):
-        final_perm_full[feat] = imp_mean
+        results[target] = {
+            'model': final_model,
+            'importances': df_final,
+            'nested_cv_r2_mean': nested_cv_r2_mean,
+            'nested_cv_r2_std': nested_cv_r2_std,
+            'final_cv_r2_mean': final_cv_r2_mean,
+            'final_cv_r2_std': final_cv_r2_std,
+            'chosen_params': final_search.best_params_,
+        }
 
-    # Merge final into summary
-    def get_val(d, k):
-        return d[k] if k in d else 0.0
+    return results
 
-    summary_df["final_impurity_importance"] = summary_df["feature"].apply(lambda f: get_val(final_impurity, f))
-    summary_df["final_permutation_importance"] = summary_df["feature"].apply(lambda f: get_val(final_perm_full, f))
-
-    # Normalize relevant columns (safe)
-    for col in [
-        "avg_impurity_importance",
-        "avg_permutation_importance",
-        "final_impurity_importance",
-        "final_permutation_importance",
-    ]:
-        total = summary_df[col].sum()
-        norm_col = f"{col}_norm"
-        summary_df[norm_col] = summary_df[col] / total if total > 0 else 0.0
-
-    result = {
-        "nested_cv_r2_mean": nested_cv_r2_mean,
-        "nested_cv_r2_std": nested_cv_r2_std,
-        "final_cv_r2_mean": final_cv_r2_mean,
-        "final_cv_r2_std": final_cv_r2_std,
-        "summary_df": summary_df,
-        "final_model": final_model,
-        "chosen_params": final_search.best_params_,
-    }
-    return result
-
-
-# ---------- MAIN ----------
+# ---------- ENTRYPOINT ----------
 def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    ea_diff_df = load_expected_actual_diffs(EXPECTED_ACTUAL_CSV)
-    df_features = load_all_features(PNOC_FEATURES_CSV)
-    merged = ea_diff_df.merge(df_features, on="PNOC ID", how="inner")
+    ea_diff_df, milestone_variances = load_and_preprocess_expected_actual(EXPECTED_ACTUAL_CSV)
+    df_features = load_and_preprocess_features(PNOC_FEATURES_CSV)
+    merged = merge_features_targets(df_features, ea_diff_df)
     if merged.empty:
-        raise RuntimeError("Merged dataset is empty; check PNOC ID alignment.")
+        raise RuntimeError("Merged dataset is empty. Check PNOC ID alignment.")
 
-    target_cols = [c for c in merged.columns if c.startswith("EA_diff_")]
-    X_base = merged.drop(columns=["PNOC ID"] + target_cols)
+    results = train_and_get_importances(merged)
 
-    for target in target_cols:
+    for target, info in results.items():
         print(f"\n=== Target: {target} ===")
-        y = merged[target]
-        res = train_target_nested_rf(X_base, y)
-        if res is None:
-            print(f"Skipping {target} (no usable data).")
-            continue
+        print(f"Nested CV R²: {info['nested_cv_r2_mean']:.3f} ± {info['nested_cv_r2_std']:.3f}")
+        print(f"Final model CV R²: {info['final_cv_r2_mean']:.3f} ± {info['final_cv_r2_std']:.3f}")
+        print(f"Chosen params: {info['chosen_params']}")
+        # top features
+        top = info['importances'][['feature', 'final_permutation_importance']].head(10)
+        print("Top features by final permutation importance:")
+        print(top.to_string(index=False))
 
-        # Milestone pair label
-        raw = target.replace("EA_diff_", "")
-        if "_to_" in raw:
-            from_m, to_m = raw.split("_to_")
-            milestone_pair = f"{from_m} → {to_m}"
+        # save CSV
+        pair_raw = target.replace("EA_diff_", "")
+        if "_to_" in pair_raw:
+            from_m, to_m = pair_raw.split("_to_")
+            fname = f"feature_importances_{from_m}_to_{to_m}.csv"
         else:
-            milestone_pair = target
-
-        print(f"Nested CV R²: {res['nested_cv_r2_mean']:.3f} ± {res['nested_cv_r2_std']:.3f}")
-        print(f"Final CV R²: {res['final_cv_r2_mean']:.3f} ± {res['final_cv_r2_std']:.3f}")
-        print(f"Final hyperparameters: {res['chosen_params']}")
-
-        print("Top features by aggregated permutation importance:")
-        print(
-            res["summary_df"][
-                ["feature", "avg_permutation_importance", "std_permutation_importance"]
-            ].head(10)
-        )
-
-        # Prepare output
-        out_df = res["summary_df"].copy()
-        out_df.insert(0, "Milestone Pair", milestone_pair)
-        metrics = {
-            "milestone_pair": milestone_pair,
-            "nested_cv_r2_mean": res["nested_cv_r2_mean"],
-            "nested_cv_r2_std": res["nested_cv_r2_std"],
-            "final_cv_r2_mean": res["final_cv_r2_mean"],
-            "final_cv_r2_std": res["final_cv_r2_std"],
-            "chosen_params": res["chosen_params"],
-        }
-
-        filename_base = safe_filename(f"feature_importances_{milestone_pair}")
-        csv_path = OUTPUT_DIR / f"{filename_base}.csv"
-        json_path = OUTPUT_DIR / f"metrics_{filename_base}.json"
-
-        out_df.to_csv(csv_path, index=False)
-        pd.Series(metrics).to_json(json_path)
-
-        print(f"Saved importances CSV to {csv_path}")
-        print(f"Saved metrics JSON to {json_path}")
-
+            fname = f"feature_importances_{pair_raw}.csv"
+        fname = safe_filename(fname)
+        out_path = OUTPUT_DIR / fname
+        info['importances'].to_csv(out_path, index=False)
+        print(f"Saved importances for {target} to {out_path}")
 
 if __name__ == "__main__":
     main()
-
