@@ -16,10 +16,10 @@ from sklearn.model_selection import (
 )
 from sklearn.preprocessing import MultiLabelBinarizer
 
-# ---------- CONFIG (adjust paths if needed) ----------
+# ---------- CONFIG ----------
 EXPECTED_ACTUAL_CSV = r"C:\Users\anish.nair\Downloads\Expected_and_Actual_Milestones.csv"
 PNOC_FEATURES_CSV = r"C:\Users\anish.nair\Downloads\Merged_PNOC_Data.csv"
-OUTPUT_DIR = Path("feature_importances_nested_cv")  # output directory
+OUTPUT_DIR = Path("feature_importances_optimized")  # output directory
 
 NUMERIC_IMPUTE_COLS = [
     'CI', 'RM', 'Total CI Closed', 'Avg Days', 'Total CI Late',
@@ -32,12 +32,13 @@ CANONICAL_MILESTONES = [
     "Staff TA/Au Due", "NOC Issued", "Revision Issued"
 ]
 
-# hyperparameter space
+# expanded hyperparameter search space
 PARAM_DIST = {
-    'n_estimators': [100, 200, 500],
-    'max_depth': [None, 5, 10, 20],
-    'min_samples_leaf': [1, 2, 4],
-    'max_features': ['sqrt', 'log2', 0.5],
+    'n_estimators': [100, 200, 500, 1000],
+    'max_depth': [None, 5, 10, 20, 30],
+    'min_samples_leaf': [1, 2, 4, 8],
+    'min_samples_split': [2, 5, 10],
+    'max_features': ['sqrt', 'log2', 0.3, 0.5, 0.8],
 }
 
 # ---------- UTILITIES ----------
@@ -45,6 +46,8 @@ def safe_filename(s: str) -> str:
     return re.sub(r'[\\/:"*?<>| ]+', '_', s)
 
 def get_outer_cv(n_samples: int):
+    if n_samples >= 150:
+        return RepeatedKFold(n_splits=5, n_repeats=4, random_state=42)
     if n_samples >= 100:
         return RepeatedKFold(n_splits=5, n_repeats=3, random_state=42)
     if n_samples >= 50:
@@ -60,16 +63,17 @@ def get_inner_cv(n_samples: int):
         return KFold(n_splits=3, shuffle=True, random_state=1)
     return LeaveOneOut()
 
-# ---------- DATA PREPROCESSING ----------
+# ---------- DATA LOADING / PREPROCESSING ----------
 def load_and_preprocess_expected_actual(path: str):
     df = pd.read_csv(path, low_memory=False)
     required = {'PNOC ID', 'Process', 'Expected', 'Actual'}
     if not required.issubset(df.columns):
-        missing = required - set(df.columns)
-        raise ValueError(f"Expected/Actual file missing columns: {missing}")
+        raise ValueError(f"Expected/Actual file missing columns: {required - set(df.columns)}")
 
     df['PNOC ID'] = df['PNOC ID'].astype(str).str.strip()
-    df['Process'] = df['Process'].astype(str).str.replace(r"\s*/\s*", "/", regex=True).str.strip()
+    df['Process'] = (df['Process'].astype(str)
+                     .str.replace(r"\s*/\s*", "/", regex=True)
+                     .str.strip())
     df['Process'] = df['Process'].replace({r"PNOC/?\s*CI Issued": "PNOC/CI Issued"}, regex=True)
     df = df[df['Process'].isin(CANONICAL_MILESTONES)].copy()
 
@@ -80,18 +84,17 @@ def load_and_preprocess_expected_actual(path: str):
     df['Process'] = pd.Categorical(df['Process'], categories=CANONICAL_MILESTONES, ordered=True)
     df = df.sort_values(['PNOC ID', 'Process'])
 
-    var_wide = (
-        df.groupby(['PNOC ID', 'Process'], observed=True)['variance']
-          .first()
-          .unstack('Process')
-          .reindex(columns=CANONICAL_MILESTONES)
-    )
+    var_wide = (df.groupby(['PNOC ID', 'Process'], observed=True)['variance']
+                  .first()
+                  .unstack('Process')
+                  .reindex(columns=CANONICAL_MILESTONES))
 
     milestone_variance_dfs = {
         milestone: var_wide[[milestone]].reset_index().rename(columns={milestone: 'variance'})
         for milestone in CANONICAL_MILESTONES
     }
 
+    # build EA_diff targets
     diffs = {}
     for i in range(1, len(CANONICAL_MILESTONES)):
         prev = CANONICAL_MILESTONES[i - 1]
@@ -112,14 +115,19 @@ def load_and_preprocess_features(path: str):
         raise ValueError("Features file missing 'PNOC ID' column")
     df['PNOC ID'] = df['PNOC ID'].astype(str).str.strip()
 
-    # fill/encode critical and group
+    # drop leakage/date columns
+    for leak in ['Baseline', 'Actual', 'Date', 'Need Date']:
+        if leak in df.columns:
+            df = df.drop(columns=[leak])
+
+    # critical/group fill
     for col in ['critical', 'Group']:
         if col in df.columns:
             df[col] = df[col].fillna('Unknown').astype(str)
         else:
             df[col] = 'Unknown'
 
-    # numeric imputes
+    # numeric impute columns
     for col in NUMERIC_IMPUTE_COLS:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -134,7 +142,7 @@ def load_and_preprocess_features(path: str):
             dummies = pd.get_dummies(df[cc].astype(str), prefix=cc.replace(" ", "_"))
             df = pd.concat([df, dummies], axis=1)
 
-    # one-hot critical and group
+    # one-hot critical/group
     if 'critical' in df.columns:
         df = pd.concat([df, pd.get_dummies(df['critical'].astype(str), prefix='critical')], axis=1)
     if 'Group' in df.columns:
@@ -161,7 +169,7 @@ def load_and_preprocess_features(path: str):
     drop_cols = ['critical', 'Group'] + [c for c in CENTROID_COLS if c in df.columns] + ['Requestor(s)']
     df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
 
-    # dedupe
+    # dedupe if duplicates
     if df['PNOC ID'].duplicated().any():
         numeric = df.select_dtypes(include=["number"]).columns.tolist()
         non_numeric = [c for c in df.columns if c not in numeric and c != 'PNOC ID']
@@ -171,50 +179,47 @@ def load_and_preprocess_features(path: str):
 
     return df
 
-def merge_features_targets(features_df: pd.DataFrame, target_df: pd.DataFrame):
-    return target_df.merge(features_df, on='PNOC ID', how='inner')
+# ---------- MODELING / NESTED CV ----------
+def choose_best_target_variant(y: pd.Series):
+    """
+    Compare raw vs winsorized (5-95 percentile clipped) target and return the one with higher nested CV R2.
+    We'll return a dict { 'y': chosen_series, 'variant': 'raw'|'clipped' }.
+    """
+    # compute clipping bounds
+    lower = y.quantile(0.05)
+    upper = y.quantile(0.95)
+    clipped = y.clip(lower=lower, upper=upper)
+    return {'raw': y, 'clipped': clipped}
 
-# ---------- MODEL TRAINING & IMPORTANCE WITH NESTED CV ----------
-def train_and_get_importances(merged: pd.DataFrame, random_state=42):
-    target_cols = [c for c in merged.columns if c.startswith("EA_diff_")]
-    X_base = merged.drop(columns=['PNOC ID'] + target_cols)
+def train_single_target_with_nested_cv(X: pd.DataFrame, y: pd.Series, random_state=42):
+    mask = ~y.isna()
+    X_valid = X.loc[mask].copy()
+    y_valid = y.loc[mask].astype(float).copy()
+    n = len(y_valid)
+    if n == 0:
+        return None
 
-    # one-hot remaining object-like columns
-    obj_cols = X_base.select_dtypes(include=['object', 'category']).columns.tolist()
-    if obj_cols:
-        X_base = pd.get_dummies(X_base, columns=obj_cols, drop_first=True)
+    outer_cv = get_outer_cv(n)
+    inner_cv = get_inner_cv(n)
 
-    results = {}
-    for target in target_cols:
-        y = merged[target].astype(float)
-        X = X_base.copy()
-        mask = ~y.isna()
-        X = X.loc[mask]
-        y = y.loc[mask]
-        n = len(y)
-        if n == 0:
-            print(f"[WARN] skipping {target}: no valid target examples.")
-            continue
-
-        # nested CV: outer for performance, inner for tuning
-        outer_cv = get_outer_cv(n)
-        inner_cv = get_inner_cv(n)
-
+    # Try both variants: raw and clipped; pick better nested CV R2 mean
+    candidate_variants = choose_best_target_variant(y_valid)
+    best_overall = None  # store best result across variants
+    for variant_name, y_variant in candidate_variants.items():
         outer_r2s = []
-        # accumulate importances over outer folds
         impurity_accum = defaultdict(list)
         perm_accum = defaultdict(list)
-        best_params = []
+        best_params_list = []
 
-        for train_idx, test_idx in outer_cv.split(X, y):
-            X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
-            y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
+        for train_idx, test_idx in outer_cv.split(X_valid, y_variant):
+            X_tr, X_te = X_valid.iloc[train_idx], X_valid.iloc[test_idx]
+            y_tr, y_te = y_variant.iloc[train_idx], y_variant.iloc[test_idx]
 
             base = RandomForestRegressor(random_state=random_state)
             search = RandomizedSearchCV(
                 base,
                 param_distributions=PARAM_DIST,
-                n_iter=25,
+                n_iter=50,
                 scoring='r2',
                 cv=inner_cv,
                 n_jobs=-1,
@@ -223,25 +228,23 @@ def train_and_get_importances(merged: pd.DataFrame, random_state=42):
             )
             search.fit(X_tr, y_tr)
             best = search.best_estimator_
-            best_params.append(tuple(sorted(search.best_params_.items())))
+            best_params_list.append(tuple(sorted(search.best_params_.items())))
 
             r2_outer = best.score(X_te, y_te)
             outer_r2s.append(r2_outer)
 
-            # impurity importances from fitted best
             if hasattr(best, 'feature_importances_'):
                 for feat, imp in zip(X_tr.columns, best.feature_importances_):
                     impurity_accum[feat].append(imp)
 
-            # permutation importance on outer test
-            perm = permutation_importance(best, X_te, y_te, n_repeats=10, random_state=random_state, n_jobs=-1)
+            perm = permutation_importance(best, X_te, y_te, n_repeats=10, random_state=random_state+1, n_jobs=-1)
             for feat, imp_mean in zip(X_te.columns, perm.importances_mean):
                 perm_accum[feat].append(imp_mean)
 
         nested_cv_r2_mean = np.mean(outer_r2s)
         nested_cv_r2_std = np.std(outer_r2s)
 
-        # aggregate into DataFrame
+        # aggregate feature importance
         features = sorted(set(list(impurity_accum.keys()) + list(perm_accum.keys())))
         summary_rows = []
         for feat in features:
@@ -254,59 +257,91 @@ def train_and_get_importances(merged: pd.DataFrame, random_state=42):
                 'avg_permutation_importance': np.mean(perm_list) if perm_list else 0.0,
                 'std_permutation_importance': np.std(perm_list) if perm_list else 0.0,
             })
-        df_imp_agg = pd.DataFrame(summary_rows).sort_values('avg_permutation_importance', ascending=False).reset_index(drop=True)
+        df_agg = pd.DataFrame(summary_rows).sort_values('avg_permutation_importance', ascending=False).reset_index(drop=True)
 
-        # Determine final parameters (most frequent from outer folds)
-        if best_params:
-            most_common = Counter(best_params).most_common(1)[0][0]
+        # choose final params as most common from outer folds
+        final_params = {}
+        if best_params_list:
+            most_common = Counter(best_params_list).most_common(1)[0][0]
             final_params = dict(most_common)
-        else:
-            final_params = {}
 
-        # Fit final model on all data using tuned params via a secondary search to refine
-        # Here we do a final RandomizedSearchCV for stability using repeated CV
+        # final model tuning on full variant data
         final_cv = RepeatedKFold(n_splits=5 if n >= 10 else max(2, n), n_repeats=2, random_state=7) if n >= 10 else LeaveOneOut()
         final_search = RandomizedSearchCV(
             RandomForestRegressor(random_state=random_state),
             param_distributions=PARAM_DIST,
-            n_iter=30,
+            n_iter=50,
             scoring='r2',
             cv=final_cv,
             n_jobs=-1,
-            random_state=random_state + 1,
+            random_state=random_state + 2,
             verbose=0
         )
-        final_search.fit(X, y)
+        final_search.fit(X_valid, y_variant)
         final_model = final_search.best_estimator_
 
-        # Final CV metrics
-        final_cv_scores = cross_val_score(final_model, X, y, cv=final_cv, scoring='r2', n_jobs=-1)
+        final_cv_scores = cross_val_score(final_model, X_valid, y_variant, cv=final_cv, scoring='r2', n_jobs=-1)
         final_cv_r2_mean = np.mean(final_cv_scores)
         final_cv_r2_std = np.std(final_cv_scores)
 
-        # Final importances
+        # final importances
         final_impurity = {}
         if hasattr(final_model, 'feature_importances_'):
-            for feat, imp in zip(X.columns, final_model.feature_importances_):
+            for feat, imp in zip(X_valid.columns, final_model.feature_importances_):
                 final_impurity[feat] = imp
         final_perm_full = {}
-        perm_full = permutation_importance(final_model, X, y, n_repeats=15, random_state=random_state + 2, n_jobs=-1)
-        for feat, imp_mean in zip(X.columns, perm_full.importances_mean):
+        perm_full = permutation_importance(final_model, X_valid, y_variant, n_repeats=15, random_state=random_state + 3, n_jobs=-1)
+        for feat, imp_mean in zip(X_valid.columns, perm_full.importances_mean):
             final_perm_full[feat] = imp_mean
 
-        # Merge final into aggregated table
+        # merge final into aggregated
         def safe_get(d, k):
             return d[k] if k in d else 0.0
 
-        df_imp_agg['final_impurity_importance'] = df_imp_agg['feature'].apply(lambda f: safe_get(final_impurity, f))
-        df_imp_agg['final_permutation_importance'] = df_imp_agg['feature'].apply(lambda f: safe_get(final_perm_full, f))
+        df_agg['final_impurity_importance'] = df_agg['feature'].apply(lambda f: safe_get(final_impurity, f))
+        df_agg['final_permutation_importance'] = df_agg['feature'].apply(lambda f: safe_get(final_perm_full, f))
 
-        # Normalize columns for comparison
         for col in ['avg_impurity_importance', 'avg_permutation_importance',
                     'final_impurity_importance', 'final_permutation_importance']:
-            total = df_imp_agg[col].sum()
-            norm = f'{col}_norm'
-            df_imp_agg[norm] = df_imp_agg[col] / total if total > 0 else 0.0
+            total = df_agg[col].sum()
+            norm_col = f'{col}_norm'
+            df_agg[norm_col] = df_agg[col] / total if total > 0 else 0.0
+
+        result = {
+            'nested_cv_r2_mean': nested_cv_r2_mean,
+            'nested_cv_r2_std': nested_cv_r2_std,
+            'final_cv_r2_mean': final_cv_r2_mean,
+            'final_cv_r2_std': final_cv_r2_std,
+            'df_agg': df_agg,
+            'final_model': final_model,
+            'chosen_params': final_search.best_params_,
+            'variant_used': variant_name,
+        }
+
+        # choose better variant by nested CV mean
+        if best_overall is None or result['nested_cv_r2_mean'] > best_overall['nested_cv_r2_mean']:
+            best_overall = result
+
+    return best_overall
+
+def train_and_get_importances(merged: pd.DataFrame, random_state=42):
+    target_cols = [c for c in merged.columns if c.startswith("EA_diff_")]
+    X_base = merged.drop(columns=['PNOC ID'] + target_cols)
+
+    # one-hot encode any remaining object-like
+    obj_cols = X_base.select_dtypes(include=['object', 'category']).columns.tolist()
+    if obj_cols:
+        X_base = pd.get_dummies(X_base, columns=obj_cols, drop_first=True)
+
+    results = {}
+    for target in target_cols:
+        y = merged[target]
+        n_nonnull = y.notna().sum()
+        print(f"\n--- Training target {target} ({n_nonnull} non-null examples) ---")
+        best = train_single_target_with_nested_cv(X_base, y, random_state=random_state)
+        if best is None:
+            print(f"Skipping {target}: no valid data")
+            continue
 
         # human readable pair
         pair_raw = target.replace("EA_diff_", "")
@@ -316,24 +351,25 @@ def train_and_get_importances(merged: pd.DataFrame, random_state=42):
         else:
             milestone_pair_display = target
 
-        # finalize table
-        df_final = df_imp_agg.copy()
+        df_final = best['df_agg'].copy()
         df_final.insert(0, 'Milestone Pair', milestone_pair_display)
-        # append summary metrics columns to top row for clarity (as separate columns)
-        df_final['nested_cv_r2_mean'] = nested_cv_r2_mean
-        df_final['nested_cv_r2_std'] = nested_cv_r2_std
-        df_final['final_cv_r2_mean'] = final_cv_r2_mean
-        df_final['final_cv_r2_std'] = final_cv_r2_std
-        df_final['chosen_params'] = str(final_search.best_params_)
+        # append summary columns
+        df_final['nested_cv_r2_mean'] = best['nested_cv_r2_mean']
+        df_final['nested_cv_r2_std'] = best['nested_cv_r2_std']
+        df_final['final_cv_r2_mean'] = best['final_cv_r2_mean']
+        df_final['final_cv_r2_std'] = best['final_cv_r2_std']
+        df_final['chosen_params'] = str(best['chosen_params'])
+        df_final['variant_used'] = best['variant_used']
 
         results[target] = {
-            'model': final_model,
+            'model': best['final_model'],
             'importances': df_final,
-            'nested_cv_r2_mean': nested_cv_r2_mean,
-            'nested_cv_r2_std': nested_cv_r2_std,
-            'final_cv_r2_mean': final_cv_r2_mean,
-            'final_cv_r2_std': final_cv_r2_std,
-            'chosen_params': final_search.best_params_,
+            'nested_cv_r2_mean': best['nested_cv_r2_mean'],
+            'nested_cv_r2_std': best['nested_cv_r2_std'],
+            'final_cv_r2_mean': best['final_cv_r2_mean'],
+            'final_cv_r2_std': best['final_cv_r2_std'],
+            'chosen_params': best['chosen_params'],
+            'variant_used': best['variant_used'],
         }
 
     return results
@@ -344,23 +380,23 @@ def main():
 
     ea_diff_df, milestone_variances = load_and_preprocess_expected_actual(EXPECTED_ACTUAL_CSV)
     df_features = load_and_preprocess_features(PNOC_FEATURES_CSV)
-    merged = merge_features_targets(df_features, ea_diff_df)
+    merged = ea_diff_df.merge(df_features, on='PNOC ID', how='inner')
     if merged.empty:
-        raise RuntimeError("Merged dataset is empty. Check PNOC ID alignment.")
+        raise RuntimeError("Merged dataset is empty; check PNOC ID alignment.")
 
-    results = train_and_get_importances(merged)
+    results = train_and_get_importances(merged, random_state=42)
 
     for target, info in results.items():
         print(f"\n=== Target: {target} ===")
+        print(f"Variant used: {info['variant_used']}")
         print(f"Nested CV R²: {info['nested_cv_r2_mean']:.3f} ± {info['nested_cv_r2_std']:.3f}")
         print(f"Final model CV R²: {info['final_cv_r2_mean']:.3f} ± {info['final_cv_r2_std']:.3f}")
         print(f"Chosen params: {info['chosen_params']}")
-        # top features
         top = info['importances'][['feature', 'final_permutation_importance']].head(10)
         print("Top features by final permutation importance:")
         print(top.to_string(index=False))
 
-        # save CSV
+        # Save CSV
         pair_raw = target.replace("EA_diff_", "")
         if "_to_" in pair_raw:
             from_m, to_m = pair_raw.split("_to_")
@@ -374,3 +410,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
